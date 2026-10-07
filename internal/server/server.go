@@ -11,6 +11,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"vrndis/internal/addr"
 	"vrndis/internal/ethernet"
@@ -46,6 +47,22 @@ func DefaultConfig() Config {
 	}
 }
 
+// ClientInfo 客户端详细信息
+type ClientInfo struct {
+	IP           net.IP
+	MAC          net.HardwareAddr
+	Peer         string
+	Name         string
+	FirstConnect time.Time
+	LastActive   time.Time
+	LeaseID      uint64
+	Prefix       int
+	Gateway      net.IP
+	DNS          []string
+	MTU          int
+	ServerMac    net.HardwareAddr
+}
+
 // Server 虚拟 RNDIS 服务器。
 type Server struct {
 	cfg    Config
@@ -68,6 +85,9 @@ type Server struct {
 
 	framesIn  atomic.Uint64 // 从客户端收到的帧
 	framesOut atomic.Uint64 // 发往客户端的帧
+
+	// 客户端管理器 (仅用于管理功能)
+	clientManager *ClientManager
 }
 
 type session struct {
@@ -89,7 +109,6 @@ func (s *session) send(typ byte, body []byte) error {
 	return proto.WriteMessage(s.conn, typ, body)
 }
 
-// enqueueFrame 非阻塞入队；队列满则丢帧（背压策略）。
 func (s *session) enqueueFrame(frame []byte) {
 	buf := append([]byte(nil), frame...)
 	select {
@@ -139,7 +158,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
-	return &Server{
+	srv := &Server{
 		cfg:      cfg,
 		pool:     pool,
 		sw:       ethswitch.New(),
@@ -148,7 +167,9 @@ func New(cfg Config) (*Server, error) {
 		logger:   log.Default(),
 		sessions: make(map[string]*session),
 		stopCh:   make(chan struct{}),
-	}, nil
+	}
+	srv.clientManager = NewClientManager(srv)
+	return srv, nil
 }
 
 // Addr 实际监听地址。
@@ -186,10 +207,11 @@ func (s *Server) Start() error {
 	s.logger.Printf("vrndis server: TAP %s 就绪（网关 %s/%d），监听 %s",
 		dev.Name(), s.cfg.Gateway, s.pool.Prefix(), s.ln.Addr())
 
-	s.wg.Add(3)
+	s.wg.Add(4) // 新增 localhost 心跳协程
 	go s.acceptLoop()
 	go s.tapLoop()
 	go s.tapWriter()
+	go s.clientManager.startHeartbeat()
 	return nil
 }
 
@@ -237,6 +259,54 @@ func (s *Server) FreeAddresses() int { return s.pool.Free() }
 // Stats 帧统计。
 func (s *Server) Stats() (in, out uint64) {
 	return s.framesIn.Load(), s.framesOut.Load()
+}
+
+// GetClients 获取所有在线客户端信息
+func (s *Server) GetClients() []*ClientInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	clients := make([]*ClientInfo, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		lease := sess.lease
+		clients = append(clients, &ClientInfo{
+			IP:           lease.IP,
+			MAC:          lease.MAC,
+			Peer:         sess.peer,
+			Name:         sess.name,
+			LeaseID:      lease.ClientID,
+			Prefix:       lease.Prefix,
+			Gateway:      lease.Gateway,
+			DNS:          s.cfg.DNS,
+			MTU:          s.cfg.MTU,
+			ServerMac:    s.tapMAC,
+			FirstConnect: time.Now(), // 实际应该记录 connect time
+			LastActive:   time.Now(),
+		})
+	}
+	return clients
+}
+
+// SendCommandToClient 向指定客户端发送管理命令
+func (s *Server) SendCommandToClient(mac string, cmd []byte) error {
+	s.mu.RLock()
+	sess, ok := s.sessions[mac]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("客户端未找到 (mac=%s)", mac)
+	}
+	return sess.send(proto.TypeManagement, cmd)
+}
+
+// KickClient 踢出客户端
+func (s *Server) KickClient(mac string) error {
+	s.mu.RLock()
+	sess, ok := s.sessions[mac]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("客户端未找到 (mac=%s)", mac)
+	}
+	sess.conn.Close()
+	return nil
 }
 
 // ---- 内部 ----
@@ -333,6 +403,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 		case proto.TypeKeepalive:
 			// 心跳，忽略
+		case proto.TypePing:
+			// 响应 PING
+			_ = sess.send(proto.TypePong, nil)
+		case proto.TypeManagement:
+			// 管理消息，忽略（后续实现具体命令）
 		case proto.TypeBye:
 			return
 		default:
@@ -432,4 +507,41 @@ func mustJSON(v any) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// ClientManager 实现客户端管理逻辑
+type ClientManager struct {
+	server *Server
+}
+
+func NewClientManager(server *Server) *ClientManager {
+	return &ClientManager{server: server}
+}
+
+func (cm *ClientManager) startHeartbeat() {
+	defer cm.server.wg.Done()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cm.server.stopCh:
+			return
+		case <-ticker.C:
+			cm.checkClients()
+		}
+	}
+}
+
+func (cm *ClientManager) checkClients() {
+	cm.server.mu.RLock()
+	defer cm.server.mu.RUnlock()
+
+	for mac, sess := range cm.server.sessions {
+		// 发送 PING 请求，期望 PONG 响应
+		_ = sess.send(proto.TypePing, nil)
+		_ = sess
+		_ = mac
+	}
 }
