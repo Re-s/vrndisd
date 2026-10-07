@@ -18,29 +18,6 @@ Go 重写版：**单文件静态二进制**，性能更好、可交叉编译 Win
 - **服务化**：`vrndisd service install` 一条命令装成 systemd / Windows 服务（开机自启、崩溃自拉）
 - **Linux/Windows**：数据面 Linux TAP（/dev/net/tun）/ Windows wintun；服务工具双平台
 
-## 目录
-
-```
-vrndis-go/
-├── cmd/vrndisd/            # CLI：server | client | service | service-run | version
-├── internal/
-│   ├── proto/              # 线路协议（分帧 + JSON 控制消息，含 fuzz 测试）
-│   ├── ethernet/           # 以太网帧/ARP（含 fuzz 测试）
-│   ├── addr/               # 地址池（分配/回收/复用）
-│   ├── tap/                # 网卡抽象：Linux TAP / Windows wintun / Fake（测试）
-│   ├── ethswitch/          # 学习型二层交换机
-│   ├── server/             # 服务器（含端到端 + 健壮性测试）
-│   ├── client/             # 客户端
-│   └── service/            # 配置文件 + systemd/SCM 服务管理
-├── tests/                  # 真实环境压测脚本（root）
-│   ├── stress-real.sh      #   netns 多客户端 + 丢包/吞吐
-│   └── reconnect-loop.sh   #   kill -9 重连循环
-├── docs/
-│   ├── robustness-plan.md  # 健壮性测试规划（L1-L6 分层 + 执行手册）
-│   └── windows.md          # Windows 部署说明
-└── README.md
-```
-
 ## 快速开始
 
 ### 前台运行
@@ -78,7 +55,67 @@ vrndisd.exe service uninstall
 配置写入 `--config`（Linux 默认 `/etc/vrndisd.conf`，Windows 默认 `%ProgramData%\vrndisd\vrndisd.conf`），
 JSON 格式可手工编辑后 `service stop && service start` 生效。
 
-### 测试
+### 在线管理功能
+
+```bash
+# 获取在线客户端列表
+# 服务器运行时调用 GetClients() API
+
+# 踢出指定客户端
+# srv.KickClient("01:02:03:04:05:06")
+
+# 发送管理命令
+# srv.SendCommandToClient("01:02:03:04:05:06", cmd)
+```
+
+### STUN 服务器（P2P 连接支持）
+
+```bash
+# 构建并运行 STUN 服务器
+./build/build.sh all
+
+# 确保有 WebSocket 支持，然后运行 STUN 服务器
+./build/bin/stun-server/stun-server --listen :3478
+```
+
+## 构建
+
+### 交叉编译
+
+```bash
+./build/build.sh all           # 构建所有架构
+./build/build.sh arm64         # 仅 ARM64
+./build/build.sh armv6         # 仅 ARMv6
+./build/build.sh armv7         # 仅 ARMv7
+./build/build.sh amd64         # 仅 amd64 (默认)
+./build/build.sh clean         # 清理构建产物
+```
+
+### 构建产物
+
+- `build/bin/amd64/vrndisd` - amd64 版本
+- `build/bin/arm64/vrndisd` - arm64 版本
+- `build/bin/armv6/vrndisd` - armv6 版本
+- `build/bin/armv7/vrndisd` - armv7 版本
+- `build/bin/stun-server/stun-server` - STUN 服务器
+
+### Docker 构建
+
+```bash
+docker-compose -f build/docker-compose.arm.yml build --pull
+```
+
+### 构建版本号说明
+
+所有二进制文件都嵌入了 **Git 提交哈希** 版本号，例如：
+
+```
+vrndisd 1.0.0+214215c (linux/amd64)
+```
+
+其中 `214215c` 是 Git 提交哈希的简写，便于版本追踪和调试。
+
+## 测试
 
 ```bash
 go test ./... -count=1                  # 单元 + 端到端 + 健壮性（L1-L3）
@@ -107,3 +144,34 @@ Linux 单元特性：`Restart=always`（3s 后拉起）、`TimeoutStopSec=10`（
 - 数据面**明文 TCP，无认证**——仅适用于可信网络；跨公网请套 SSH/WireGuard/TLS 隧道
 - 服务以 root/管理员运行（TAP 需要），请限制可连接来源 IP
 - 健壮性测试规划与已知加固待办见 `docs/robustness-plan.md`（鉴权、MAC 表老化、限速等）
+
+## 文件结构
+
+```
+vrndis-go/
+├── cmd/vrndisd/            # CLI：server | client | service | service-run | version
+├── internal/
+│   ├── proto/              # 线路协议（分帧 + JSON 控制消息，含 fuzz 测试）
+│   ├── ethernet/           # 以太网帧/ARP（含 fuzz 测试）
+│   ├── addr/               # 地址池（分配/回收/复用）
+│   ├── tap/                # 网卡抽象：Linux TAP / Windows wintun / Fake（测试）
+│   ├── ethswitch/          # 学习型二层交换机
+│   ├── server/             # 服务器（含端到端 + 健壮性测试）
+│   ├── client/             # 客户端
+│   ├── service/            # 配置文件 + systemd/SCM 服务管理
+│   └── stun/               # STUN 服务器实现（P2P 连接支持）
+├── build/
+│   ├── build.sh            # 统一构建脚本 (含鸿蒙_PIGO 版本)
+│   ├── Makefile            # Make 构建接口
+│   ├── Dockerfile.arm      # ARM Docker 构建
+│   └── docker-compose.arm.yml
+├── tests/
+│   ├── stress-real.sh      # 真实压测脚本
+│   └── reconnect-loop.sh   # 崩溃恢复测试
+├── docs/
+│   ├── robustness-plan.md
+│   └── windows.md
+└── README.md
+```
+
+这是基于原始 vrndis-go 项目的增强版本，添加了对客户端管理和 STUN 的支持。
