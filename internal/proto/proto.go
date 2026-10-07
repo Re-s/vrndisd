@@ -1,6 +1,8 @@
 // Package proto 定义 vrndis 线路协议。
 //
 // TCP 连接上的每条消息：body_len(u32 大端) | type(u8) | body。
+// 控制消息（HELLO/ASSIGN/KEEPALIVE/BYE）的 body 为 JSON；
+// DATA 消息的 body 为原始以太网帧。
 package proto
 
 import (
@@ -18,23 +20,29 @@ const (
 	TypeKeepalive byte = 4
 	TypeBye       byte = 5
 	// 新增管理消息类型
-	TypePing    byte = 6
-	TypePong    byte = 7
+	TypePing      byte = 6
+	TypePong      byte = 7
 	TypeManagement byte = 8
 )
 
+// MaxBody 单条消息体上限（256 KiB，容纳超长帧）。
 const MaxBody = 256 * 1024
+
+// ProtocolVersion 当前协议版本。
+const ProtocolVersion = 1
 
 var (
 	ErrTooLarge   = errors.New("vrndis/proto: message body too large")
 	ErrBadMessage = errors.New("vrndis/proto: malformed message")
 )
 
+// Message 一条线路消息。
 type Message struct {
 	Type byte
 	Body []byte
 }
 
+// TypeName 用于日志的消息名。
 func TypeName(t byte) string {
 	switch t {
 	case TypeHello:
@@ -58,6 +66,7 @@ func TypeName(t byte) string {
 	}
 }
 
+// WriteMessage 把一条消息完整写入 w。调用方负责并发互斥。
 func WriteMessage(w io.Writer, typ byte, body []byte) error {
 	if len(body) > MaxBody {
 		return ErrTooLarge
@@ -76,6 +85,7 @@ func WriteMessage(w io.Writer, typ byte, body []byte) error {
 	return nil
 }
 
+// ReadMessage 读取一条消息；对端断开时返回 io.EOF / io.ErrUnexpectedEOF。
 func ReadMessage(r io.Reader) (Message, error) {
 	var hdr [5]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -94,6 +104,7 @@ func ReadMessage(r io.Reader) (Message, error) {
 	return Message{Type: hdr[4], Body: body}, nil
 }
 
+// WriteJSON 编码 JSON 控制消息。
 func WriteJSON(w io.Writer, typ byte, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -102,6 +113,7 @@ func WriteJSON(w io.Writer, typ byte, v any) error {
 	return WriteMessage(w, typ, data)
 }
 
+// ReadJSON 读取消息并解析 JSON body。
 func ReadJSON(r io.Reader, v any) (byte, error) {
 	msg, err := ReadMessage(r)
 	if err != nil {
