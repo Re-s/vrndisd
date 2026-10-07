@@ -139,7 +139,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Listen = "0.0.0.0:7777"
 	}
 	if cfg.MTU == 0 {
-	.cfg.MTU = 1500
+	cfg.MTU = 1500
 	}
 	if len(cfg.DNS) == 0 {
 		cfg.DNS = []string{"8.8.8.8", "1.1.1.1"}
