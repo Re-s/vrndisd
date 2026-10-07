@@ -43,61 +43,55 @@ done
 mkdir -p "$BUILD_DIR"
 
 # 构建函数
-build_project() {
-    local project="$1"
-    local cmd_path="$2"
-    local output_dir="$BUILD_DIR/$3"
-    
+build_vrndisgo() {
+    local arch="$1"
+    local output_dir="$BUILD_DIR/$arch"
     mkdir -p "$output_dir"
-    local binary_name="$4"
+    
     local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion"
     [ "$RELEASE" = true ] && ldflags="$ldflags -s -w"
     
-    echo "🔧 编译 $project..."
-    go build -o "$output_dir/$binary_name" -ldflags "$ldflags" "$cmd_path"
+    echo "🔧 编译 vrndis-go $arch..."
+    go build -o "$output_dir/vrndisd" -ldflags "$ldflags" ./cmd/vrndisd
     
-    if [ -x "$output_dir/$binary_name" ]; then
-        echo "✅ $project 构建完成 → $output_dir/$binary_name"
-        # 显示版本
-        if [ "$binary_name" = "vrndisd" ]; then
-            version_output=$(("$output_dir/$binary_name" version 2>&1 | grep "vrndisd"))
-            echo "   版本: $version_output"
-        elif [ "$binary_name" = "stun-server" ]; then
-            version_output=$(("$output_dir/$binary_name" --version 2>&1 | grep "stun-server"))
-            echo "   版本: $version_output"
-        fi
+    if [ -x "$output_dir/vrndisd" ]; then
+        echo "✅ vrndis-go $arch 构建完成 → $output_dir/vrndisd"
+        version_output=$(("$output_dir/vrndisd" version 2>&1 | grep "vrndisd"))
+        echo "   版本: $version_output"
     else
-        echo "❌ $project 构建失败!"
+        echo "❌ vrndis-go $arch 构建失败!"
         return 1
     fi
 }
 
-# 编译 vrndisd (使用共享架构配置)
+build_stunserver() {
+    local output_dir="$BUILD_DIR/stun-server"
+    mkdir -p "$output_dir"
+    
+    local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion"
+    [ "$RELEASE" = true ] && ldflags="$ldflags -s -w"
+    
+    echo "🔧 编译 stun-server..."
+    go build -o "$output_dir/stun-server" -ldflags "$ldflags" ./cmd/stun-server
+    
+    if [ -x "$output_dir/stun-server" ]; then
+        echo "✅ stun-server 构建完成 → $output_dir/stun-server"
+        version_output=$(("$output_dir/stun-server" --version 2>&1 | grep "stun-server"))
+        echo "   版本: $version_output"
+    else
+        echo "❌ stun-server 构建失败!"
+        return 1
+    fi
+}
+
+# 执行所有架构构建
 for arch in $ARCHS; do
-    case $arch in
-        arm64)
-            GOOS=linux GOARCH=arm64 ;;
-        armv6)
-            GOOS=linux GOARCH=arm GOARM=6 ;;
-        armv7)
-            GOOS=linux GOARCH=arm GOARM=7 ;;
-        amd64)
-            GOOS=linux GOARCH=amd64 ;;
-    esac
-    
-    echo "🔧 编译 vrndis-go $arch..."
-    export GOOS="$GOOS"
-    export GOARCH="$GOARCH"
-    [ "$GOARCH" = "arm" ] && export GOARM="$GOARM"
-    
-    build_project "vrndis-go" "./cmd/vrndisd" "vrndisd" "$arch"
+    build_vrndisgo "$arch"
     echo ""
 done
 
-# 编译 stun-server (仅 amd64，可以添加更多支持)
-echo "🔧 编译 stun-server amd64..."
-export GOOS=linux GOARCH=amd64
-build_project "stun-server" "./cmd/stun-server" "stun-server" "generic"
+# 编译 stun-server (当前仅 amd64)
+build_stunserver
 echo ""
 
 # 显示构建信息
