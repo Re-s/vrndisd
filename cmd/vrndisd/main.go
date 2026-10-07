@@ -48,14 +48,6 @@ func main() {
 		err = cmdService(args[1:])
 	case "service-run":
 		err = cmdServiceRun(args[1:], globalCfg)
-	case "status":
-		err = cmdStatus(args[1:])
-	case "clients":
-		err = cmdClients(args[1:])
-	case "status":
-		err = cmdStatus(args[1:])
-	case "clients":
-		err = cmdClients(args[1:])
 	case "version", "-V", "--version":
 		fmt.Printf("vrndisd %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 	case "-h", "--help", "help":
@@ -270,8 +262,6 @@ func cmdService(args []string) error {
 		return mgr.Start()
 	case "stop":
 		return mgr.Stop()
-	case "status":
-		st, err := mgr.Status()
 		if err != nil {
 			return err
 		}
