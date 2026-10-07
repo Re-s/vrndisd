@@ -24,6 +24,7 @@ const tapPort = "tap"
 
 // Config 服务器配置。
 type Config struct {
+	Version     string   // 版本号
 	Listen  string   // 监听地址，如 "0.0.0.0:7777"
 	Network string   // 虚拟地址池，如 "10.77.0.0/24"
 	Gateway string   // 网关（服务器自身地址），如 "10.77.0.1"
@@ -545,3 +546,6 @@ func (cm *ClientManager) checkClients() {
 		_ = mac
 	}
 }
+
+// Version 服务端版本号
+var Version = "1.0.0+unknown"
