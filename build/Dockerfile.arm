@@ -1,0 +1,28 @@
+# vrndis-go ARM 多架构 Docker 构建
+# 支持 arm64, armv6, armv7
+
+FROM golang:1.21-bullseye AS builder
+
+# 安装 ARM 交叉编译工具链 (需要时)
+RUN apt-get update && apt-get install -y     gcc-arm-linux-gnueabihf     && rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /build
+
+# 复制 go.mod 和 go.sum
+COPY go.mod go.sum* ./
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 编译主程序
+RUN go build -o vrndisd ./cmd/vrndisd
+
+# 输出到构建目录
+RUN mkdir -p /output && cp vrndisd /output/
+
+FROM scratch AS runner
+COPY --from=builder /output/vrndisd /
+EXPOSE 7777
+ENTRYPOINT [/vrndisd]

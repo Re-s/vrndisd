@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  vrndis-arm64:
+    build:
+      context: ..
+      dockerfile: Dockerfile.arm
+      args:
+        TARGETARCH: arm64
+    image: vrndis-go:arm64
+    platforms:
+      - linux/arm64
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    network_mode: host
+    restart: unless-stopped
+
+  vrndis-armv7:
+    build:
+      context: ..
+      dockerfile: Dockerfile.arm
+      args:
+        TARGETARCH: arm
+    image: vrndis-go:armv7
+    platforms:
+      - linux/arm/v7
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    network_mode: host
+    restart: unless-stopped
+
+  vrndis-armv6:
+    build:
+      context: ..
+      dockerfile: Dockerfile.arm
+      args:
+        TARGETARCH: arm
+    image: vrndis-go:armv6
+    platforms:
+      - linux/arm/v6
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    network_mode: host
+    restart: unless-stopped
+
+# 一键构建所有 ARM 架构
+# docker-compose -f build/docker-compose.arm.yml build --pull
