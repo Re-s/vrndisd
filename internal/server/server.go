@@ -408,6 +408,31 @@ func (s *Server) handleConn(conn net.Conn) {
 			_ = sess.send(proto.TypePong, nil)
 		case proto.TypeManagement:
 			// 管理消息，忽略（后续实现具体命令）
+		
+		if msg.Type == proto.TypeManagement {
+			// 简单的管理协议
+			var req ManagementRequest
+			if json.Unmarshal(msg.Body, &req) == nil {
+				var resp ManagementResponse
+				switch req.Cmd {
+				case "status":
+					resp.Version = "1.0.0"
+					resp.Clients = s.SessionCount()
+					respBytes, _ := json.Marshal(resp)
+					sess.send(proto.TypeManagement, respBytes)
+				case "clients":
+					for _, c := range s.GetClients() {
+						resp.List = append(resp.List, ClientInfo{IP: c.IP.String(), MAC: c.MAC.String(), Peer: c.Peer, Name: c.Name})
+					}
+					resp.Version = "1.0.0"
+					resp.Clients = len(resp.List)
+					respBytes, _ := json.Marshal(resp)
+					sess.send(proto.TypeManagement, respBytes)
+				default:
+					// 不支持的命令
+				}
+			}
+		}
 		case proto.TypeBye:
 			return
 		default:
