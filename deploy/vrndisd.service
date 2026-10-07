@@ -1,0 +1,20 @@
+[Unit]
+Description=vrndis-go 虚拟 RNDIS 网络隧道服务端
+Documentation=https://github.com/octop-lab/vrndis-go
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 服务端模式：监听 0.0.0.0:7777，创建 vrndis0 虚拟 TAP 网卡，虚拟网段 10.77.0.0/24
+ExecStart=/usr/local/bin/vrndisd server --listen 0.0.0.0:7777 --network 10.77.0.0/24 --gateway 10.77.0.1 --dns 8.8.8.8,1.1.1.1 --tap vrndis0 --mtu 1500
+# 创建 TAP 网卡需要 CAP_NET_ADMIN；部分平台还需 CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

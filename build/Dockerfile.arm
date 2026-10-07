@@ -1,10 +1,8 @@
 # vrndis-go ARM 多架构 Docker 构建
 # 支持 arm64, armv6, armv7
+# 产物：/vrndisd (隧道服务端) + /stun-server (STUN 反射器)
 
-FROM golang:1.21-bullseye AS builder
-
-# 安装 ARM 交叉编译工具链 (需要时)
-RUN apt-get update && apt-get install -y     gcc-arm-linux-gnueabihf     && rm -rf /var/lib/apt/lists/*
+FROM golang:1.24-bullseye AS builder
 
 # 设置工作目录
 WORKDIR /build
@@ -16,13 +14,16 @@ RUN go mod download
 # 复制源代码
 COPY . .
 
-# 编译主程序
-RUN go build -o vrndisd ./cmd/vrndisd
+# 编译主程序与 STUN 服务器 (纯静态，CGO 关闭以支持 scratch/alpine)
+RUN CGO_ENABLED=0 go build -o vrndisd ./cmd/vrndisd \
+    && CGO_ENABLED=0 go build -o stun-server ./cmd/stun-server
 
-# 输出到构建目录
-RUN mkdir -p /output && cp vrndisd /output/
-
-FROM scratch AS runner
-COPY --from=builder /output/vrndisd /
-EXPOSE 7777
-ENTRYPOINT [/vrndisd]
+# 运行阶段使用 alpine 提供 shell，供 docker-entrypoint.sh 使用
+FROM alpine:3.20 AS runner
+RUN apk add --no-cache tzdata
+COPY --from=builder /build/vrndisd /
+COPY --from=builder /build/stun-server /
+COPY build/docker-entrypoint.sh /
+RUN chmod +x /docker-entrypoint.sh
+EXPOSE 7777 3478
+ENTRYPOINT ["/docker-entrypoint.sh"]

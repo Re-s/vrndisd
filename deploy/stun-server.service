@@ -1,0 +1,17 @@
+[Unit]
+Description=vrndis-go STUN 反射服务器（P2P 打洞辅助）
+Documentation=https://github.com/octop-lab/vrndis-go
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# STUN UDP 监听 0.0.0.0:3478
+ExecStart=/usr/local/bin/stun-server --listen 0.0.0.0:3478
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
