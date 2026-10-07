@@ -1,0 +1,18 @@
+# 构建产物
+build/bin/
+*.exe
+*.bin
+
+# 测试输出
+test_output/
+
+# 文档 srcs
+stun-server
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

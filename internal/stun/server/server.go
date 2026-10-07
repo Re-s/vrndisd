@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
-	"time"
 
 	"vrndis/internal/stun/protocol"
 )
