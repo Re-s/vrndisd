@@ -6,7 +6,7 @@
 //	vrndisd client  --server HOST:7777 [--tap vrndis-c0] [--name X] [--default-route]
 //	vrndisd service install|uninstall|start|stop|status [--mode server|client ...]
 //	vrndisd service-run [--config PATH]
-//	vrndisd version
+//	vrndisd Version
 package main
 
 import (
@@ -46,7 +46,7 @@ func main() {
 	case "service-run":
 		err = cmdServiceRun(args[1:], globalCfg)
 	case "version", "-V", "--version":
-		fmt.Printf("vrndisd %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("vrndisd %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 	case "-h", "--help", "help":
 		usage()
 	default:
