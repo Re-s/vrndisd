@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/binary"
 	"log"
 	"net"
 	"time"
@@ -43,7 +44,6 @@ func (s *Server) Start() error {
 		msg, _ := protocol.Parse(buf[:n])
 		s.logger.Printf("STUN %s from %s", protocol.TypeName(msg.Type), peer.String())
 		if msg.Type == protocol.BindingRequest {
-			// simple XOR-Mapped-Address response
 			peerBytes := encodeXOR(peer.IP, peer.Port)
 			msgType := uint16(protocol.BindingResponse)
 			resp := make([]byte, 20+len(peerBytes)+4)
