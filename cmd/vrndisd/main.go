@@ -48,6 +48,10 @@ func main() {
 		err = cmdService(args[1:])
 	case "service-run":
 		err = cmdServiceRun(args[1:], globalCfg)
+	case "status":
+		err = cmdStatus(args[1:])
+	case "clients":
+		err = cmdClients(args[1:])
 	case "version", "-V", "--version":
 		fmt.Printf("vrndisd %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 	case "-h", "--help", "help":
@@ -369,4 +373,77 @@ func defaultConfigPath() string {
 		return filepath.Join(".", "vrndisd.conf")
 	}
 	return "/etc/vrndisd.conf"
+}
+
+// cmdStatus - 查询服务器状态和版本信息
+func cmdStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	serverAddr := fs.String("server", "127.0.0.1:7777", "服务器地址")
+	fs.Parse(args)
+
+	conn, err := net.DialTimeout("tcp", *serverAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("连接服务器失败: %v", err)
+	}
+	defer conn.Close()
+
+	// 发送 status 请求
+	req := proto.ManagementRequest{Cmd: "status"}
+	reqBytes, _ := json.Marshal(req)
+	proto.WriteMessage(conn, proto.TypeManagement, reqBytes)
+
+	// 等待响应
+	msg, err := proto.ReadMessage(conn)
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	if msg.Type == proto.TypeManagement {
+		var resp proto.ManagementResponse
+		if err := json.Unmarshal(msg.Body, &resp); err != nil {
+			return fmt.Errorf("解析响应失败: %v", err)
+		}
+		fmt.Printf("状态: 版本=%s 在线客户端=%d\n", resp.Version, resp.Clients)
+		return nil
+	}
+
+	return fmt.Errorf("收到非管理消息类型")
+}
+
+// cmdClients - 查询在线客户端列表
+func cmdClients(args []string) error {
+	fs := flag.NewFlagSet("clients", flag.ExitOnError)
+	serverAddr := fs.String("server", "127.0.0.1:7777", "服务器地址")
+	fs.Parse(args)
+
+	conn, err := net.DialTimeout("tcp", *serverAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("连接服务器失败: %v", err)
+	}
+	defer conn.Close()
+
+	// 发送 clients 请求
+	req := proto.ManagementRequest{Cmd: "clients"}
+	reqBytes, _ := json.Marshal(req)
+	proto.WriteMessage(conn, proto.TypeManagement, reqBytes)
+
+	// 等待响应
+	msg, err := proto.ReadMessage(conn)
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	if msg.Type == proto.TypeManagement {
+		var resp proto.ManagementResponse
+		if err := json.Unmarshal(msg.Body, &resp); err != nil {
+			return fmt.Errorf("解析响应失败: %v", err)
+		}
+		fmt.Printf("在线客户端列表 (%d):\n", resp.Clients)
+		for i, c := range resp.List {
+			fmt.Printf("  %d. %s (%s) - %s\n", i+1, c.Name, c.MAC, c.Peer)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("收到非管理消息类型")
 }
