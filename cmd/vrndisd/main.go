@@ -48,6 +48,10 @@ func main() {
 		err = cmdService(args[1:])
 	case "service-run":
 	case "status":
+	case "status":
+		err = cmdStatus(args[1:])
+	case "clients":
+		err = cmdClients(args[1:])
 		err = cmdStatus(args[1:])
 	case "clients":
 		err = cmdClients(args[1:])
