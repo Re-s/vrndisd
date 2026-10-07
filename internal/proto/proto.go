@@ -124,3 +124,27 @@ func ReadJSON(r io.Reader, v any) (byte, error) {
 	}
 	return msg.Type, nil
 }
+
+// 管理消息
+type ManagementRequest struct {
+    Cmd string `json:"cmd"`
+}
+
+type ManagementResponse struct {
+    Version string `json:"version"`
+    Clients int    `json:"clients"`
+    List    []ClientInfo `json:"list,omitempty"`
+}
+
+// CustomClientInfo for JSON
+type ClientInfo struct {
+    IP   string `json:"ip"`
+    MAC  string `json:"mac"`
+    Peer string `json:"peer"`
+    Name string `json:"name"`
+}
+
+func (ci ClientInfo) Serialize() []byte {
+    data, _ := json.Marshal(ci)
+    return data
+}
