@@ -11,7 +11,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"vrndis/internal/addr"
 	"vrndis/internal/ethernet"
