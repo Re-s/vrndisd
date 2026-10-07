@@ -56,8 +56,8 @@ build_vrndisgo() {
     
     if [ -x "$output_dir/vrndisd" ]; then
         echo "✅ vrndis-go $arch 构建完成 → $output_dir/vrndisd"
-        version_output=$(("$output_dir/vrndisd" version 2>&1 | grep "vrndisd"))
-        echo "   版本: $version_output"
+        version_out=$("$output_dir/vrndisd" version 2>&1 | grep "vrndisd" || true)
+        echo "   版本: $version_out"
     else
         echo "❌ vrndis-go $arch 构建失败!"
         return 1
@@ -76,8 +76,8 @@ build_stunserver() {
     
     if [ -x "$output_dir/stun-server" ]; then
         echo "✅ stun-server 构建完成 → $output_dir/stun-server"
-        version_output=$(("$output_dir/stun-server" --version 2>&1 | grep "stun-server"))
-        echo "   版本: $version_output"
+        version_out=$("$output_dir/stun-server" --version 2>&1 | grep "stun-server" || true)
+        echo "   版本: $version_out"
     else
         echo "❌ stun-server 构建失败!"
         return 1
