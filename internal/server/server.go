@@ -22,6 +22,9 @@ import (
 
 const tapPort = "tap"
 
+// 服务端版本号
+var Version = "1.0.0+unknown"
+
 // Config 服务器配置。
 type Config struct {
 	Listen  string   // 监听地址，如 "0.0.0.0:7777"
@@ -49,18 +52,16 @@ func DefaultConfig() Config {
 
 // ClientInfo 客户端详细信息
 type ClientInfo struct {
-	IP           net.IP
-	MAC          net.HardwareAddr
-	Peer         string
-	Name         string
-	FirstConnect time.Time
-	LastActive   time.Time
-	LeaseID      uint64
-	Prefix       int
-	Gateway      net.IP
-	DNS          []string
-	MTU          int
-	ServerMac    net.HardwareAddr
+	IP        net.IP
+	MAC       net.HardwareAddr
+	Peer      string
+	Name      string
+	LeaseID   uint64
+	Prefix    int
+	Gateway   net.IP
+	DNS       []string
+	MTU       int
+	ServerMac net.HardwareAddr
 }
 
 // Server 虚拟 RNDIS 服务器。
@@ -85,9 +86,6 @@ type Server struct {
 
 	framesIn  atomic.Uint64 // 从客户端收到的帧
 	framesOut atomic.Uint64 // 发往客户端的帧
-
-	// 客户端管理器 (仅用于管理功能)
-	clientManager *ClientManager
 }
 
 type session struct {
@@ -141,7 +139,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Listen = "0.0.0.0:7777"
 	}
 	if cfg.MTU == 0 {
-		cfg.MTU = 1500
+	.cfg.MTU = 1500
 	}
 	if len(cfg.DNS) == 0 {
 		cfg.DNS = []string{"8.8.8.8", "1.1.1.1"}
@@ -158,7 +156,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
-	srv := &Server{
+	return &Server{
 		cfg:      cfg,
 		pool:     pool,
 		sw:       ethswitch.New(),
@@ -167,9 +165,7 @@ func New(cfg Config) (*Server, error) {
 		logger:   log.Default(),
 		sessions: make(map[string]*session),
 		stopCh:   make(chan struct{}),
-	}
-	srv.clientManager = NewClientManager(srv)
-	return srv, nil
+	}, nil
 }
 
 // Addr 实际监听地址。
@@ -207,11 +203,10 @@ func (s *Server) Start() error {
 	s.logger.Printf("vrndis server: TAP %s 就绪（网关 %s/%d），监听 %s",
 		dev.Name(), s.cfg.Gateway, s.pool.Prefix(), s.ln.Addr())
 
-	s.wg.Add(4) // 新增 localhost 心跳协程
+	s.wg.Add(3)
 	go s.acceptLoop()
 	go s.tapLoop()
 	go s.tapWriter()
-	go s.clientManager.startHeartbeat()
 	return nil
 }
 
@@ -269,44 +264,36 @@ func (s *Server) GetClients() []*ClientInfo {
 	for _, sess := range s.sessions {
 		lease := sess.lease
 		clients = append(clients, &ClientInfo{
-			IP:           lease.IP,
-			MAC:          lease.MAC,
-			Peer:         sess.peer,
-			Name:         sess.name,
-			LeaseID:      lease.ClientID,
-			Prefix:       lease.Prefix,
-			Gateway:      lease.Gateway,
-			DNS:          s.cfg.DNS,
-			MTU:          s.cfg.MTU,
-			ServerMac:    s.tapMAC,
-			FirstConnect: time.Now(), // 实际应该记录 connect time
-			LastActive:   time.Now(),
+			IP:        lease.IP,
+			MAC:       lease.MAC,
+			Peer:      sess.peer,
+			Name:      sess.name,
+			LeaseID:   lease.ClientID,
+			Prefix:    lease.Prefix,
+			Gateway:   lease.Gateway,
+			DNS:       s.cfg.DNS,
+			MTU:       s.cfg.MTU,
+			ServerMac: s.tapMAC,
 		})
 	}
 	return clients
 }
 
-// SendCommandToClient 向指定客户端发送管理命令
-func (s *Server) SendCommandToClient(mac string, cmd []byte) error {
+// getManagementClientInfo 获取用于管理响应的客户端信息
+func (s *Server) getManagementClientInfo() []proto.ClientInfo {
 	s.mu.RLock()
-	sess, ok := s.sessions[mac]
-	s.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("客户端未找到 (mac=%s)", mac)
+	defer s.mu.RUnlock()
+	list := make([]proto.ClientInfo, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		lease := sess.lease
+		list = append(list, proto.ClientInfo{
+			IP:   lease.IP.String(),
+			MAC:  lease.MAC.String(),
+			Peer: sess.peer,
+			Name: sess.name,
+		})
 	}
-	return sess.send(proto.TypeManagement, cmd)
-}
-
-// KickClient 踢出客户端
-func (s *Server) KickClient(mac string) error {
-	s.mu.RLock()
-	sess, ok := s.sessions[mac]
-	s.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("客户端未找到 (mac=%s)", mac)
-	}
-	sess.conn.Close()
-	return nil
+	return list
 }
 
 // ---- 内部 ----
@@ -407,24 +394,19 @@ func (s *Server) handleConn(conn net.Conn) {
 			// 响应 PING
 			_ = sess.send(proto.TypePong, nil)
 		case proto.TypeManagement:
-			// 管理消息，忽略（后续实现具体命令）
-		
-		if msg.Type == proto.TypeManagement {
-			// 简单的管理协议
-			var req ManagementRequest
+			// 管理消息
+			var req proto.ManagementRequest
 			if json.Unmarshal(msg.Body, &req) == nil {
-				var resp ManagementResponse
+				var resp proto.ManagementResponse
 				switch req.Cmd {
 				case "status":
-					resp.Version = "1.0.0"
+					resp.Version = Version
 					resp.Clients = s.SessionCount()
 					respBytes, _ := json.Marshal(resp)
 					sess.send(proto.TypeManagement, respBytes)
 				case "clients":
-					for _, c := range s.GetClients() {
-						resp.List = append(resp.List, ClientInfo{IP: c.IP.String(), MAC: c.MAC.String(), Peer: c.Peer, Name: c.Name})
-					}
-					resp.Version = "1.0.0"
+					resp.List = s.getManagementClientInfo()
+					resp.Version = Version
 					resp.Clients = len(resp.List)
 					respBytes, _ := json.Marshal(resp)
 					sess.send(proto.TypeManagement, respBytes)
@@ -432,7 +414,6 @@ func (s *Server) handleConn(conn net.Conn) {
 					// 不支持的命令
 				}
 			}
-		}
 		case proto.TypeBye:
 			return
 		default:
@@ -532,41 +513,4 @@ func mustJSON(v any) []byte {
 		panic(err)
 	}
 	return b
-}
-
-// ClientManager 实现客户端管理逻辑
-type ClientManager struct {
-	server *Server
-}
-
-func NewClientManager(server *Server) *ClientManager {
-	return &ClientManager{server: server}
-}
-
-func (cm *ClientManager) startHeartbeat() {
-	defer cm.server.wg.Done()
-
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-cm.server.stopCh:
-			return
-		case <-ticker.C:
-			cm.checkClients()
-		}
-	}
-}
-
-func (cm *ClientManager) checkClients() {
-	cm.server.mu.RLock()
-	defer cm.server.mu.RUnlock()
-
-	for mac, sess := range cm.server.sessions {
-		// 发送 PING 请求，期望 PONG 响应
-		_ = sess.send(proto.TypePing, nil)
-		_ = sess
-		_ = mac
-	}
 }
