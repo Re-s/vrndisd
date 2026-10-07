@@ -14,7 +14,7 @@ else
     VERSION_DATE="unknown"
 fi
 
-VERSION_IMPORT="vrndis/main"
+VERSION_IMPORT="main"
 VERSION_LONG="${VERSION_SHORT}-${VERSION_DATE}"
 
 default_vrndisd_version="1.0.0+${VERSION_SHORT}"
@@ -63,7 +63,7 @@ build_arch() {
             GOOS=linux GOARCH=amd64 ;;
     esac
 
-    # 设置 LDFLAGS 嵌入版本信息
+    # 设置 LDFLAGS 嵌入版本信息 - 注意大小写
     local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion"
     [ "$RELEASE" = true ] && ldflags="$ldflags -s -w"
 
