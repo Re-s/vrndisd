@@ -49,16 +49,16 @@ func DefaultConfig() Config {
 
 // ClientInfo 客户端详细信息
 type ClientInfo struct {
-	IP        net.IP
-	MAC       net.HardwareAddr
-	Peer      string
-	Name      string
-	LeaseID   uint64
-	Prefix    int
-	Gateway   net.IP
-	DNS       []string
-	MTU       int
-	ServerMac net.HardwareAddr
+	IP         net.IP
+	MAC        net.HardwareAddr
+	Peer       string
+	Name       string
+	LeaseID    uint64
+	Prefix     int
+	Gateway    net.IP
+	DNS        []string
+	MTU        int
+	ServerMac  net.HardwareAddr
 	FirstConnect time.Time
 	LastActive time.Time
 }
@@ -98,7 +98,7 @@ type session struct {
 	macKey  string
 	name    string
 	writeMu sync.Mutex
-	outQ    chan []byte // 有界发送队列：慢 소비자只丢自己的帧，不阻塞交换机
+	outQ    chan []byte // 有界发送队列：慢消费者只丢自己的帧，不阻塞交换机
 	done    chan struct{}
 	dropped atomic.Uint64
 }
@@ -269,16 +269,16 @@ func (s *Server) GetClients() []*ClientInfo {
 	for _, sess := range s.sessions {
 		lease := sess.lease
 		clients = append(clients, &ClientInfo{
-			IP:         lease.IP,
-			MAC:        lease.MAC,
-			Peer:       sess.peer,
-			Name:       sess.name,
-			LeaseID:    lease.ClientID,
-			Prefix:     lease.Prefix,
-			Gateway:    lease.Gateway,
-			DNS:        s.cfg.DNS,
-			MTU:        s.cfg.MTU,
-			ServerMac:  s.tapMAC,
+			IP:        lease.IP,
+			MAC:       lease.MAC,
+			Peer:      sess.peer,
+			Name:      sess.name,
+			LeaseID:   lease.ClientID,
+			Prefix:    lease.Prefix,
+			Gateway:   lease.Gateway,
+			DNS:       s.cfg.DNS,
+			MTU:       s.cfg.MTU,
+			ServerMac: s.tapMAC,
 			FirstConnect: time.Now(), // 实际应该记录 connect time
 			LastActive: time.Now(),
 		})
@@ -517,9 +517,7 @@ func NewClientManager(server *Server) *ClientManager {
 }
 
 func (cm *ClientManager) startHeartbeat() {
-	defer func() {
-		_ = cm.server.wg.Done()
-	}()
+	defer cm.server.wg.Done()
 	
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
