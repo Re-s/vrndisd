@@ -7,7 +7,6 @@ build/bin/
 test_output/
 
 # 文档 srcs
-stun-server
 
 # IDE
 .vscode/
