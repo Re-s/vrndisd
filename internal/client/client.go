@@ -128,9 +128,10 @@ func (c *Client) Connect() (*proto.Assignment, error) {
 	c.assign = &assign
 	c.assignMu.Unlock()
 
-	c.wg.Add(2)
+	c.wg.Add(3)
 	go c.sockToDev()
 	go c.devToSock()
+	go c.managementLoop()
 
 	c.logger.Printf("vrndis client: 已连接 %s，本机地址 %s/%d 网关 %s",
 		c.cfg.Server, assign.IP, assign.Prefix, assign.Gateway)
@@ -172,7 +173,7 @@ func (c *Client) Stop() {
 }
 
 // teardown 幂等回收：关闭连接与网卡、发出关闭信号。
-// 关键：所有错误路径都走这里，绝不会“吞掉”资源清理。
+// 关键：所有错误路径都走这里，绝不会"吞掉"资源清理。
 func (c *Client) teardown() {
 	c.closeOnce.Do(func() {
 		close(c.stopCh)
@@ -222,6 +223,11 @@ func (c *Client) sockToDev() {
 		case proto.TypeBye:
 			c.teardown()
 			return
+		case proto.TypePing:
+			// 响应 PING
+			c.send(proto.TypePong, nil)
+		case proto.TypeManagement:
+			// 处理管理消息，当前忽略
 		}
 	}
 }
@@ -248,4 +254,10 @@ func (c *Client) devToSock() {
 			return
 		}
 	}
+}
+
+// managementLoop 当前未启用，保留处理位置
+func (c *Client) managementLoop() {
+	defer c.wg.Done()
+	// 发送 PING 响应由 sockToDev 处理
 }
