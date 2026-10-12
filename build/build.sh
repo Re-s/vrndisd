@@ -1,6 +1,7 @@
 #!/bin/bash
-# vrndis-go & stun-server cross-compile build script.
+# vrndis-go cross-compile build script.
 # Targets: linux amd64/arm64/armv6/armv7 and windows amd64.
+# STUN server is integrated into vrndisd: use "vrndisd stun-server" command.
 
 set -e
 
@@ -9,16 +10,14 @@ BUILD_DIR="./build/bin"
 # ---- version + date: always dynamic, never hardcoded literals ----
 if [ -d ".git" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     VERSION_SHORT=$(git rev-parse --short HEAD 2>/dev/null)
-    # commit date (author date can be stale after merge/rebase), as UTC ISO-8601
     COMMIT_TS=$(git show -s --format=%ct HEAD 2>/dev/null)
     if [ -n "$COMMIT_TS" ]; then
-        VERSION_DATE=$(date -u -d "@$COMMIT_TS" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+        VERSION_DATE=$(date -u -d "@$COMMIT_TS" +%Y-%m-%dT%H:%M:%SZ)
     else
         VERSION_DATE="unknown"
     fi
 else
     VERSION_SHORT="unknown"
-    # not a git checkout: fall back to the actual current build time
     VERSION_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 fi
 
@@ -62,7 +61,6 @@ target_props() {
 }
 
 build_one() {
-    # $1 = package dir, $2 = output binary path, $3 = GOOS, $4 = GOARCH, $5 = GOARM
     GOOS="$3" GOARCH="$4" GOARM="$5" CGO_ENABLED=0 \
         go build -o "$2" -ldflags "$LDFLAGS" "$1"
 }
@@ -81,8 +79,6 @@ build_target() {
     local tag="$goos/$goarch"
     [ "$goarm" != "0" ] && tag="$tag/goarm$goarm"
 
-    # only the host platform can actually be executed here; cross-built
-    # binaries are verified by file type only.
     local runnable=false
     if [ "$goos" = "$(go env GOOS)" ] && [ "$goarch" = "$(go env GOARCH)" ]; then
         runnable=true
@@ -103,24 +99,6 @@ build_target() {
             || { echo "ERROR: $output_dir/$bin is not an ELF binary"; return 1; }
         echo "   ok: $(file -b "$output_dir/$bin" | cut -c1-70) (cross-built, version check skipped)"
     fi
-
-    # --- stun-server (same target, so windows gets stun-server.exe too) ---
-    local sbin="stun-server"
-    [ "$goos" = "windows" ] && sbin="stun-server.exe"
-    echo "== building stun-server ($tag) -> $output_dir/$sbin"
-    build_one ./cmd/stun-server "$output_dir/$sbin" "$goos" "$goarch" "$goarm"
-    if [ "$runnable" = true ]; then
-        [ -x "$output_dir/$sbin" ] || { echo "ERROR: stun-server build failed for $name"; return 1; }
-        echo "   version: $( "$output_dir/$sbin" --version 2>&1 | grep "stun-server" || true )"
-    elif [ "$goos" = "windows" ]; then
-        file "$output_dir/$sbin" | grep -q "PE32" \
-            || { echo "ERROR: $output_dir/$sbin is not a PE binary"; return 1; }
-        echo "   ok: $(file -b "$output_dir/$sbin") (cross-built, version check skipped)"
-    else
-        file "$output_dir/$sbin" | grep -q "ELF" \
-            || { echo "ERROR: $output_dir/$sbin is not an ELF binary"; return 1; }
-        echo "   ok: $(file -b "$output_dir/$sbin" | cut -c1-70) (cross-built, version check skipped)"
-    fi
 }
 
 for name in $TARGETS; do
@@ -128,7 +106,6 @@ for name in $TARGETS; do
     echo ""
 done
 
-# ---- summary ----
 echo "build summary:"
 echo "  git commit : $VERSION_SHORT"
 echo "  commit date: $VERSION_DATE"
@@ -145,7 +122,6 @@ echo "artifacts:"
   done )
 echo ""
 
-# ---- tarball ----
 echo "packing..."
 tar -czf "./vrndis-go-build-${VERSION_SHORT}.tar.gz" -C "$BUILD_DIR" .
 echo "tarball: ./vrndis-go-build-${VERSION_SHORT}.tar.gz"
