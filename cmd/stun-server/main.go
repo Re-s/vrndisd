@@ -15,7 +15,7 @@ import (
 var Version = "1.0.0+unknown"
 
 func main() {
-	listen := flag.String("listen", ":3478", "STUN 监听地址")
+	listen := flag.String("listen", ":5478", "STUN 监听地址")
 	showVersion := flag.Bool("version", false, "显示版本")
 	flag.Parse()
 

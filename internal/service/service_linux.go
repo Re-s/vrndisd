@@ -36,13 +36,14 @@ type linuxManager struct{}
 
 func newPlatformManager() Manager { return &linuxManager{} }
 
-func (m *linuxManager) Install(cfgPath string) error {
-	exe, err := os.Executable()
+// Install 先把配置写入 cfgPath（Linux 规范路径 /etc/vrndisd.conf），再注册并启动 systemd 单元。
+func (m *linuxManager) Install(cfg *Config, cfgPath string) error {
+	if err := cfg.Save(cfgPath); err != nil {
+		return fmt.Errorf("写入配置 %s 失败: %w", cfgPath, err)
+	}
+	exe, err := absExecutable()
 	if err != nil {
 		return fmt.Errorf("定位可执行文件失败: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
 	}
 	absCfg, err := filepath.Abs(cfgPath)
 	if err != nil {

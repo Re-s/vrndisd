@@ -20,16 +20,22 @@ const (
 	TypeKeepalive byte = 4
 	TypeBye       byte = 5
 	// 新增管理消息类型
-	TypePing      byte = 6
-	TypePong      byte = 7
+	TypePing       byte = 6
+	TypePong       byte = 7
 	TypeManagement byte = 8
+	// 新增 P2P 消息类型
+	TypeP2PAdvertise  byte = 9  // 客户端 -> 服务器：上报本机候选（NAT 映射地址）
+	TypePeerCandidate byte = 10 // 服务器 -> 客户端：下发对端 MAC + 候选地址
 )
 
 // MaxBody 单条消息体上限（256 KiB，容纳超长帧）。
 const MaxBody = 256 * 1024
 
 // ProtocolVersion 当前协议版本。
-const ProtocolVersion = 1
+//
+//	1: 纯中继（服务器经 TCP + 学习型交换机转发所有帧）
+//	2: 加入 P2P 直连（客户端上报候选、服务器协调交换、打洞失败回退中继）
+const ProtocolVersion = 2
 
 var (
 	ErrTooLarge   = errors.New("vrndis/proto: message body too large")
@@ -61,6 +67,10 @@ func TypeName(t byte) string {
 		return "PONG"
 	case TypeManagement:
 		return "MANAGEMENT"
+	case TypeP2PAdvertise:
+		return "P2P_ADV"
+	case TypePeerCandidate:
+		return "PEER_CAND"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}
@@ -127,24 +137,38 @@ func ReadJSON(r io.Reader, v any) (byte, error) {
 
 // 管理消息
 type ManagementRequest struct {
-    Cmd string `json:"cmd"`
+	Cmd string `json:"cmd"`
 }
 
 type ManagementResponse struct {
-    Version string `json:"version"`
-    Clients int    `json:"clients"`
-    List    []ClientInfo `json:"list,omitempty"`
+	Version string       `json:"version"`
+	Clients int          `json:"clients"`
+	List    []ClientInfo `json:"list,omitempty"`
 }
 
 // CustomClientInfo for JSON
 type ClientInfo struct {
-    IP   string `json:"ip"`
-    MAC  string `json:"mac"`
-    Peer string `json:"peer"`
-    Name string `json:"name"`
+	IP   string `json:"ip"`
+	MAC  string `json:"mac"`
+	Peer string `json:"peer"`
+	Name string `json:"name"`
 }
 
 func (ci ClientInfo) Serialize() []byte {
-    data, _ := json.Marshal(ci)
-    return data
+	data, _ := json.Marshal(ci)
+	return data
+}
+
+// P2PAdvertise 客户端向服务器上报本机 NAT 候选（P2P 模式）。
+type P2PAdvertise struct {
+	Version   int    `json:"version"`   // 协议版本，用于兼容
+	MAC       string `json:"mac"`       // 本机虚拟 MAC
+	Candidate string `json:"candidate"` // "host:port"，NAT 映射后的公网地址
+}
+
+// PeerCandidate 服务器向客户端下发对端信息（含对端 MAC + 候选地址）。
+type PeerCandidate struct {
+	Version   int    `json:"version"`
+	PeerMAC   string `json:"peer_mac"`  // 对端虚拟 MAC
+	Candidate string `json:"candidate"` // 对端 "host:port"
 }

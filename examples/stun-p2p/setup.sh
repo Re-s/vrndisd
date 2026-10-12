@@ -15,7 +15,7 @@ fi
 
 # 启动 STUN 服务器
 echo "启动 STUN 服务器..."
-./build/bin/stun-server/stun-server --addr 0.0.0.0:3478 &
+./build/bin/stun-server/stun-server --addr 0.0.0.0:5478 &
 STUN_PID=$!
 echo "STUN 服务器已启动 (PID: $STUN_PID)"
 
@@ -23,8 +23,8 @@ echo "STUN 服务器已启动 (PID: $STUN_PID)"
 sleep 1
 
 # 添加 NAT 规则 (模拟)
-iptables -t nat -A PREROUTING -p udp --dport 3478 -j ACCEPT 2>/dev/null || true
-iptables -A INPUT -p udp --dport 3478 -j ACCEPT 2>/dev/null || true
+iptables -t nat -A PREROUTING -p udp --dport 5478 -j ACCEPT 2>/dev/null || true
+iptables -A INPUT -p udp --dport 5478 -j ACCEPT 2>/dev/null || true
 
 # 启动客户端 (根据 IP 配置不同场景)
 echo "客户端网络环境:"
@@ -39,7 +39,7 @@ case $SCENARIO in
         echo "启动客户端 A 模拟..."
         ./build/bin/amd64/vrndisd client \
             --server 192.168.1.100:7777 \
-            --stun-server 192.168.1.100:3478 \
+            --stun-server 192.168.1.100:5478 \
             --name client-a &
         ;;
     2)
@@ -47,7 +47,7 @@ case $SCENARIO in
         echo "启动客户端 B 模拟..."
         ./build/bin/amd64/vrndisd client \
             --server 192.168.1.200:7777 \
-            --stun-server 192.168.1.200:3478 \
+            --stun-server 192.168.1.200:5478 \
             --name client-b &
         ;;
     3)
@@ -55,13 +55,13 @@ case $SCENARIO in
         echo "启动客户端 A..."
         ./build/bin/amd64/vrndisd client \
             --server 192.168.1.100:7777 \
-            --stun-server 192.168.1.100:3478 \
+            --stun-server 192.168.1.100:5478 \
             --name client-a &
         sleep 1
         echo "启动客户端 B..."
         ./build/bin/amd64/vrndisd client \
             --server 192.168.1.200:7777 \
-            --stun-server 192.168.1.200:3478 \
+            --stun-server 192.168.1.200:5478 \
             --name client-b &
         ;;
     *)

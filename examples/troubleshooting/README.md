@@ -187,19 +187,19 @@ iostat -xz 1 3
 **排查**:
 ```bash
 # 1. 检查 STUN 服务器端口
-ss -ulnp | grep 3478
+ss -ulnp | grep 5478
 
 # 2. 测试 STUN 响应
-nmap -sU -p 3478 服务器IP
+nmap -sU -p 5478 服务器IP
 # 或
-stund -p 3478 -c 服务器IP
+stund -p 5478 -c 服务器IP
 
 # 3. 检查 UDP 流量
-tcpdump -i any port 3478 -n
+tcpdump -i any port 5478 -n
 ```
 
 **常见问题**:
-- UDP 端口 3478 被防火墙拦截
+- UDP 端口 5478 被防火墙拦截
 - NAT 类型限制
 - 网络busy导致丢包
 

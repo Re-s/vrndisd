@@ -17,11 +17,11 @@ const AttrXORMappedAddr AttrType = 0x0020
 const MagicCookie = 0x2112A442
 
 type Message struct {
-	Type        MsgType
-	Length      uint16
-	MagicCookie uint32
+	Type          MsgType
+	Length        uint16
+	MagicCookie   uint32
 	TransactionID [12]byte
-	Attributes  map[AttrType][]byte
+	Attributes    map[AttrType][]byte
 }
 
 func Parse(data []byte) (*Message, error) {
@@ -33,6 +33,27 @@ func Parse(data []byte) (*Message, error) {
 	m.Length = binary.BigEndian.Uint16(data[2:4])
 	m.MagicCookie = uint32(binary.BigEndian.Uint32(data[4:8]))
 	copy(m.TransactionID[:], data[8:20])
+	// Parse the attribute TLV section (RFC 5389 §15).
+	// Attribute section starts at byte 20; its length is bounded by the
+	// buffer length, not the (sometimes unreliable) Length header field.
+	off := 20
+	for off+4 <= len(data) {
+		attrType := AttrType(binary.BigEndian.Uint16(data[off : off+2]))
+		attrLen := int(binary.BigEndian.Uint16(data[off+2 : off+4]))
+		off += 4
+		if off+attrLen > len(data) {
+			// Malformed / truncated attribute: stop rather than panic.
+			break
+		}
+		val := make([]byte, attrLen)
+		copy(val, data[off:off+attrLen])
+		m.Attributes[attrType] = val
+		off += attrLen
+		// STUN attributes are padded to a 4-byte boundary.
+		if pad := attrLen % 4; pad != 0 {
+			off += 4 - pad
+		}
+	}
 	return m, nil
 }
 

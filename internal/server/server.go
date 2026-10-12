@@ -22,7 +22,7 @@ import (
 const tapPort = "tap"
 
 // 服务端版本号
-var Version = "1.0.0+unknown"
+var Version = "1.0.1+unknown"
 
 // Config 服务器配置。
 type Config struct {
@@ -34,6 +34,9 @@ type Config struct {
 	TapMAC  string   // 服务器网卡 MAC（02:00:00:00:00:00，客户端用 01-FF）
 	MTU     int
 	Device  tap.Device // 可选：注入设备（测试用），为 nil 时创建真实 TAP
+
+	// P2P 是否开启 P2P 直连（默认关闭，纯中继，兼容旧客户端）
+	P2P bool
 }
 
 // DefaultConfig 默认配置。
@@ -63,6 +66,15 @@ type ClientInfo struct {
 	ServerMac net.HardwareAddr
 }
 
+// peerInfo 一个已上线的 P2P 对端（服务器侧视角）。
+type peerInfo struct {
+	mac       string // 虚拟 MAC（同时也是 peers 表键）
+	ip        net.IP
+	name      string
+	candidate string // "host:port"，该 peer 上报的 NAT 映射地址
+	conn      net.Conn
+}
+
 // Server 虚拟 RNDIS 服务器。
 type Server struct {
 	cfg    Config
@@ -75,6 +87,11 @@ type Server struct {
 
 	mu       sync.RWMutex
 	sessions map[string]*session
+
+	// P2P peer 注册表：虚拟 MAC -> peer 状态（候选地址 + 连接）
+	// 用于协调两个客户端交换候选并触发打洞。
+	peers   map[string]*peerInfo
+	peersMu sync.RWMutex
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -138,7 +155,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Listen = "0.0.0.0:7777"
 	}
 	if cfg.MTU == 0 {
-	cfg.MTU = 1500
+		cfg.MTU = 1500
 	}
 	if len(cfg.DNS) == 0 {
 		cfg.DNS = []string{"8.8.8.8", "1.1.1.1"}
@@ -163,6 +180,7 @@ func New(cfg Config) (*Server, error) {
 		ln:       ln,
 		logger:   log.Default(),
 		sessions: make(map[string]*session),
+		peers:    make(map[string]*peerInfo),
 		stopCh:   make(chan struct{}),
 	}, nil
 }
@@ -176,6 +194,14 @@ func (s *Server) Port() int {
 		return ta.Port
 	}
 	return 0
+}
+
+// listenCandidate 服务器侧候选地址（host:port）。
+// P2P 打洞采用"双方均向服务器监听端口发包"的对称打洞策略：客户端拿到该候选后
+// 向服务器监听地址发 UDP 探测，NAT 建立映射；另一侧同理。NAT 通常复用同一映射，
+// 从而使两侧可以直接互通。
+func (s *Server) listenCandidate() string {
+	return s.cfg.Listen
 }
 
 // Start 配置网卡并启动后台协程（非阻塞）。
@@ -348,6 +374,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.mu.Lock()
 		delete(s.sessions, macKey)
 		s.mu.Unlock()
+		s.unregisterPeer(macKey)
 		s.sw.Forget(macKey)
 		s.pool.Release(lease.IP)
 		conn.Close()
@@ -413,11 +440,72 @@ func (s *Server) handleConn(conn net.Conn) {
 					// 不支持的命令
 				}
 			}
+		case proto.TypeP2PAdvertise:
+			// 客户端上报本机 NAT 候选；服务器负责协调交换：把该候选下发给对端
+			if !s.cfg.P2P {
+				break // P2P 未开启，忽略
+			}
+			var adv proto.P2PAdvertise
+			if json.Unmarshal(msg.Body, &adv) != nil {
+				break
+			}
+			if adv.MAC == "" || adv.Candidate == "" {
+				break
+			}
+			s.registerPeer(sess, sess.lease.MAC.String(), adv.Candidate)
+			// 找到对端并下发其候选
+			s.distributeCandidates(sess, adv.MAC)
 		case proto.TypeBye:
 			return
 		default:
 			// 宽容未知类型，向前兼容
 		}
+	}
+}
+
+// ---- P2P ----
+
+// registerPeer 登记一个 peer 的候选地址。
+// unregisterPeer 清除已下线的 peer 记录。
+func (s *Server) unregisterPeer(mac string) {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	delete(s.peers, mac)
+	s.logger.Printf("vrndis server: 注销 peer %s", mac)
+}
+
+func (s *Server) registerPeer(sess *session, mac, candidate string) {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	s.peers[mac] = &peerInfo{
+		mac:       mac,
+		ip:        sess.lease.IP,
+		name:      sess.name,
+		candidate: candidate,
+		conn:      sess.conn,
+	}
+	s.logger.Printf("vrndis server: 候选注册 %s -> %s", mac, candidate)
+}
+
+// distributeCandidates 向当前 session 的对端下发 peer 候选。
+// 若对端已上线且已上报候选，立即下发；否则等待对端上线后再下发。
+func (s *Server) distributeCandidates(sess *session, selfMAC string) {
+	s.peersMu.RLock()
+	peers := make([]*peerInfo, 0, len(s.peers))
+	for _, p := range s.peers {
+		if p.mac != selfMAC && p.candidate != "" {
+			peers = append(peers, p)
+		}
+	}
+	s.peersMu.RUnlock()
+
+	for _, p := range peers {
+		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
+			Version:   proto.ProtocolVersion,
+			PeerMAC:   p.mac,
+			Candidate: p.candidate,
+		}))
+		s.logger.Printf("vrndis server: 向 %s 下发对端 %s 候选 %s", selfMAC, p.mac, p.candidate)
 	}
 }
 

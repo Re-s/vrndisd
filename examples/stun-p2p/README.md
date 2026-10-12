@@ -6,7 +6,7 @@
 
 ```
 [客户端A] <---STUN---> [STUN服务器] <---P2P---> [客户端B]
-[位于 NAT 后]             [3478端口]             [位于 NAT 后]
+[位于 NAT 后]             [5478端口]             [位于 NAT 后]
 ```
 
 ## 组件
@@ -19,14 +19,14 @@
 
 1. 启动 STUN 服务器：
    ```bash
-   ./build/bin/stun-server/stun-server --addr :3478
+   ./build/bin/stun-server/stun-server --addr :5478
    ```
 
 2. 启动客户端 A (无公网 IP)：
    ```bash
    ./build/bin/amd64/vrndisd client \
      --server 192.168.1.100:7777 \
-     --stun-server 192.168.1.100:3478 \
+     --stun-server 192.168.1.100:5478 \
      --name client-a
    ```
 
@@ -34,7 +34,7 @@
    ```bash
    ./build/bin/amd64/vrndisd client \
      --server 192.168.1.200:7777 \
-     --stun-server 192.168.1.200:3478 \
+     --stun-server 192.168.1.200:5478 \
      --name client-b
    ```
 
@@ -48,7 +48,7 @@
 
 ### 基本配置
 ```
-端口: 3478
+端口: 5478
 协议: UDP
  Max 请求: 无限制
  区域名: vrndis
@@ -65,10 +65,10 @@
 ### 1. STUN 连接失败
 ```bash
 # 检查防火墙
-iptables -L -n | grep 3478
+iptables -L -n | grep 5478
 
 # 检查 STUN 服务器状态
-./build/bin/stun-server/stun-server --addr :3478 --verbose
+./build/bin/stun-server/stun-server --addr :5478 --verbose
 ```
 
 ### 2. NAT 打洞失败

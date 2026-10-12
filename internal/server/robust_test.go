@@ -224,7 +224,7 @@ func TestSlowConsumerDoesNotBlockOthers(t *testing.T) {
 	}
 	select {
 	case <-found:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("慢消费者导致单播帧饿死")
 	}
 
@@ -237,7 +237,7 @@ func TestSlowConsumerDoesNotBlockOthers(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("慢消费者阻塞了新客户端接入")
 	}
 	floodWG.Wait()

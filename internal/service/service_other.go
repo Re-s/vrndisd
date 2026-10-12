@@ -16,11 +16,11 @@ type otherManager struct{}
 
 func newPlatformManager() Manager { return &otherManager{} }
 
-func (m *otherManager) Install(cfgPath string) error { return ErrNoPlatform }
-func (m *otherManager) Uninstall() error             { return ErrNoPlatform }
-func (m *otherManager) Start() error                 { return ErrNoPlatform }
-func (m *otherManager) Stop() error                  { return ErrNoPlatform }
-func (m *otherManager) Status() (Status, error)      { return Status{}, ErrNoPlatform }
+func (m *otherManager) Install(cfg *Config, cfgPath string) error { return ErrNoPlatform }
+func (m *otherManager) Uninstall() error                          { return ErrNoPlatform }
+func (m *otherManager) Start() error                              { return ErrNoPlatform }
+func (m *otherManager) Stop() error                               { return ErrNoPlatform }
+func (m *otherManager) Status() (Status, error)                   { return Status{}, ErrNoPlatform }
 
 // RunAsService 前台运行（等价于服务）。
 func RunAsService(name string, fn func(ctx context.Context) error) error {

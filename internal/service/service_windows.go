@@ -13,7 +13,12 @@ type windowsManager struct{}
 
 func newPlatformManager() Manager { return &windowsManager{} }
 
-func (m *windowsManager) Install(cfgPath string) error {
+func (m *windowsManager) Install(cfg *Config, cfgPath string) error {
+	// 1. 配置写入平台规范路径：%ProgramData%\vrndisd\vrndisd.conf
+	if err := cfg.Save(cfgPath); err != nil {
+		return fmt.Errorf("写入配置 %s 失败: %w", cfgPath, err)
+	}
+	// 2. 注册 Windows 服务（SCM），指向同一份配置文件
 	exe, err := absExecutable()
 	if err != nil {
 		return err

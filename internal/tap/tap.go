@@ -28,12 +28,20 @@ type Device interface {
 	AddDefaultRoute(gateway net.IP) error
 	// Name 网卡名。
 	Name() string
+	// SetPeerInfo 设置本端与对端网关的二层/三层寻址信息，
+	// 供 L2<->L3 适配层使用。仅 Windows wintun(三层 TUN)需要该信息
+	// 在 IP 包与以太网帧之间转换；Linux/Android TAP 是真实二层设备，
+	// 该方法为空实现。
+	SetPeerInfo(localMAC, gatewayMAC net.HardwareAddr, localIP net.IP) error
 	// Close 关闭网卡（真实 TAP 会随之销毁接口）。
 	Close() error
 }
 
 // ErrUnsupported 平台不支持或缺少驱动。
 var ErrUnsupported = errors.New("vrndis/tap: unsupported platform or missing driver")
+
+// ErrBufferFull Fake 网卡接收队列已满。
+var ErrBufferFull = errors.New("vrndis/tap: device buffer full")
 
 // Fake 内存网卡（测试用）。
 //
@@ -50,6 +58,11 @@ type Fake struct {
 	IPv4   string
 	UpFlag bool
 	Route  net.IP
+
+	// SetPeerInfo 注入的对端信息（测试断言用）。
+	PeerMAC    net.HardwareAddr
+	GatewayMAC net.HardwareAddr
+	PeerIP     net.IP
 }
 
 // NewFake 创建内存网卡。
@@ -72,12 +85,17 @@ func (f *Fake) Read() ([]byte, error) {
 }
 
 func (f *Fake) Write(frame []byte) error {
+	if f.isClosed() {
+		return errors.New("vrndis/tap: device closed")
+	}
 	buf := append([]byte(nil), frame...)
 	select {
 	case f.toApp <- buf:
 		return nil
 	case <-f.closed:
 		return errors.New("vrndis/tap: device closed")
+	default:
+		return ErrBufferFull
 	}
 }
 
@@ -90,6 +108,14 @@ func (f *Fake) Up() error                            { f.UpFlag = true; return n
 func (f *Fake) AddDefaultRoute(gateway net.IP) error { f.Route = gateway; return nil }
 func (f *Fake) Name() string                         { return f.name }
 
+// SetPeerInfo Fake 网卡本身就是二层，无需 L2↔L3 转换；
+// 仅记录注入的对端信息供测试断言。
+func (f *Fake) SetPeerInfo(localMAC, gatewayMAC net.HardwareAddr, localIP net.IP) error {
+	f.PeerMAC = append([]byte(nil), localMAC...)
+	f.GatewayMAC = append([]byte(nil), gatewayMAC...)
+	f.PeerIP = append([]byte(nil), localIP...)
+	return nil
+}
 func (f *Fake) Close() error {
 	f.closeOnce.Do(func() { close(f.closed) })
 	return nil
@@ -97,6 +123,11 @@ func (f *Fake) Close() error {
 
 // Inject 模拟操作系统向网卡注入一帧（测试侧）。
 func (f *Fake) Inject(frame []byte) error {
+	if f.isClosed() {
+		return errors.New("vrndis/tap: device closed")
+	}
+	// Inject 模拟操作系统向网卡注入帧，背压时阻塞（与真实 TAP 语义一致）；
+	// 测试侧注入方会在队列被隧道消费后继续注入。
 	buf := append([]byte(nil), frame...)
 	select {
 	case f.toTunnel <- buf:
@@ -128,4 +159,13 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+func (f *Fake) isClosed() bool {
+	select {
+	case <-f.closed:
+		return true
+	default:
+		return false
+	}
 }

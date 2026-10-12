@@ -1,109 +1,153 @@
 #!/bin/bash
-# vrndis-go & stun-server 构建脚本 (支持 Git 版本嵌入)
+# vrndis-go & stun-server cross-compile build script.
+# Targets: linux amd64/arm64/armv6/armv7 and windows amd64.
 
 set -e
 
 BUILD_DIR="./build/bin"
 
-# 获取版本信息
-if [ -d ".git" ]; then
+# ---- version + date: always dynamic, never hardcoded literals ----
+if [ -d ".git" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     VERSION_SHORT=$(git rev-parse --short HEAD 2>/dev/null)
-    VERSION_DATE=$(git log -1 --format=%ai 2>/dev/null | cut -d' ' -f1)
+    # commit date (author date can be stale after merge/rebase), as UTC ISO-8601
+    COMMIT_TS=$(git show -s --format=%ct HEAD 2>/dev/null)
+    if [ -n "$COMMIT_TS" ]; then
+        VERSION_DATE=$(date -u -d "@$COMMIT_TS" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+    else
+        VERSION_DATE="unknown"
+    fi
 else
     VERSION_SHORT="unknown"
-    VERSION_DATE="unknown"
+    # not a git checkout: fall back to the actual current build time
+    VERSION_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 fi
 
 VERSION_IMPORT="main"
-default_vrndisd_version="1.0.0+${VERSION_SHORT}"
-gitversion="$default_vrndisd_version"
+gitversion="1.0.0+${VERSION_SHORT}"
 
-# 支持的架构
-ARCHS="arm64 armv6 armv7 amd64"
+# ---- target matrix ----
+TARGETS="amd64 arm64 armv6 armv7 windows"
 RELEASE=false
-CLEAN=false
 
-# 解析参数
 for arg in "$@"; do
     case $arg in
-        arm64) ARCHS="arm64" ;;
-        armv6) ARCHS="armv6" ;;
-        armv7) ARCHS="armv7" ;;
-        amd64) ARCHS="amd64" ;;
-        all) ARCHS="arm64 armv6 armv7 amd64" ;;
+        amd64|arm64|armv6|armv7|windows) TARGETS="$arg" ;;
+        all) TARGETS="amd64 arm64 armv6 armv7 windows" ;;
         release) RELEASE=true ;;
-        clean) 
+        clean)
             rm -rf "$BUILD_DIR"/*
-            echo "🧹 清理构建目录完成"
+            echo "build output cleaned"
             exit 0
+            ;;
+        *)
+            echo "unknown argument: $arg" >&2
+            echo "usage: $0 [amd64|arm64|armv6|armv7|windows|all] [release] [clean]" >&2
+            exit 2
             ;;
     esac
 done
 
 mkdir -p "$BUILD_DIR"
 
-# 构建函数
-build_vrndisgo() {
-    local arch="$1"
-    local output_dir="$BUILD_DIR/$arch"
+# target_props <name> -> prints: GOOS GOARCH GOARM BINARY_NAME
+target_props() {
+    case "$1" in
+        amd64)   echo "linux   amd64 0 vrndisd" ;;
+        arm64)   echo "linux   arm64 0 vrndisd" ;;
+        armv6)   echo "linux   arm   6 vrndisd" ;;
+        armv7)   echo "linux   arm   7 vrndisd" ;;
+        windows) echo "windows amd64 0 vrndisd.exe" ;;
+        *) return 1 ;;
+    esac
+}
+
+build_one() {
+    # $1 = package dir, $2 = output binary path, $3 = GOOS, $4 = GOARCH, $5 = GOARM
+    GOOS="$3" GOARCH="$4" GOARM="$5" CGO_ENABLED=0 \
+        go build -o "$2" -ldflags "$LDFLAGS" "$1"
+}
+
+build_target() {
+    local name="$1"
+    set -- $(target_props "$name")
+    local goos="$1" goarch="$2" goarm="$3" bin="$4"
+    local output_dir="$BUILD_DIR/$name"
     mkdir -p "$output_dir"
-    
+
     local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion"
     [ "$RELEASE" = true ] && ldflags="$ldflags -s -w"
-    
-    echo "🔧 编译 vrndis-go $arch..."
-    go build -o "$output_dir/vrndisd" -ldflags "$ldflags" ./cmd/vrndisd
-    
-    if [ -x "$output_dir/vrndisd" ]; then
-        echo "✅ vrndis-go $arch 构建完成 → $output_dir/vrndisd"
-        version_out=$("$output_dir/vrndisd" version 2>&1 | grep "vrndisd" || true)
-        echo "   版本: $version_out"
+    LDFLAGS="$ldflags"
+
+    local tag="$goos/$goarch"
+    [ "$goarm" != "0" ] && tag="$tag/goarm$goarm"
+
+    # only the host platform can actually be executed here; cross-built
+    # binaries are verified by file type only.
+    local runnable=false
+    if [ "$goos" = "$(go env GOOS)" ] && [ "$goarch" = "$(go env GOARCH)" ]; then
+        runnable=true
+    fi
+
+    # --- vrndisd ---
+    echo "== building vrndisd ($tag) -> $output_dir/$bin"
+    build_one ./cmd/vrndisd "$output_dir/$bin" "$goos" "$goarch" "$goarm"
+    if [ "$runnable" = true ]; then
+        [ -x "$output_dir/$bin" ] || { echo "ERROR: build failed for $name"; return 1; }
+        echo "   version: $( "$output_dir/$bin" version 2>&1 | grep "vrndisd" || true )"
+    elif [ "$goos" = "windows" ]; then
+        file "$output_dir/$bin" | grep -q "PE32" \
+            || { echo "ERROR: $output_dir/$bin is not a PE binary"; return 1; }
+        echo "   ok: $(file -b "$output_dir/$bin") (cross-built, version check skipped)"
     else
-        echo "❌ vrndis-go $arch 构建失败!"
-        return 1
+        file "$output_dir/$bin" | grep -q "ELF" \
+            || { echo "ERROR: $output_dir/$bin is not an ELF binary"; return 1; }
+        echo "   ok: $(file -b "$output_dir/$bin" | cut -c1-70) (cross-built, version check skipped)"
+    fi
+
+    # --- stun-server (same target, so windows gets stun-server.exe too) ---
+    local sbin="stun-server"
+    [ "$goos" = "windows" ] && sbin="stun-server.exe"
+    echo "== building stun-server ($tag) -> $output_dir/$sbin"
+    build_one ./cmd/stun-server "$output_dir/$sbin" "$goos" "$goarch" "$goarm"
+    if [ "$runnable" = true ]; then
+        [ -x "$output_dir/$sbin" ] || { echo "ERROR: stun-server build failed for $name"; return 1; }
+        echo "   version: $( "$output_dir/$sbin" --version 2>&1 | grep "stun-server" || true )"
+    elif [ "$goos" = "windows" ]; then
+        file "$output_dir/$sbin" | grep -q "PE32" \
+            || { echo "ERROR: $output_dir/$sbin is not a PE binary"; return 1; }
+        echo "   ok: $(file -b "$output_dir/$sbin") (cross-built, version check skipped)"
+    else
+        file "$output_dir/$sbin" | grep -q "ELF" \
+            || { echo "ERROR: $output_dir/$sbin is not an ELF binary"; return 1; }
+        echo "   ok: $(file -b "$output_dir/$sbin" | cut -c1-70) (cross-built, version check skipped)"
     fi
 }
 
-build_stunserver() {
-    local output_dir="$BUILD_DIR/stun-server"
-    mkdir -p "$output_dir"
-    
-    local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion"
-    [ "$RELEASE" = true ] && ldflags="$ldflags -s -w"
-    
-    echo "🔧 编译 stun-server..."
-    go build -o "$output_dir/stun-server" -ldflags "$ldflags" ./cmd/stun-server
-    
-    if [ -x "$output_dir/stun-server" ]; then
-        echo "✅ stun-server 构建完成 → $output_dir/stun-server"
-        version_out=$("$output_dir/stun-server" --version 2>&1 | grep "stun-server" || true)
-        echo "   版本: $version_out"
-    else
-        echo "❌ stun-server 构建失败!"
-        return 1
-    fi
-}
-
-# 执行所有架构构建
-for arch in $ARCHS; do
-    build_vrndisgo "$arch"
+for name in $TARGETS; do
+    build_target "$name"
     echo ""
 done
 
-# 编译 stun-server (当前仅 amd64)
-build_stunserver
+# ---- summary ----
+echo "build summary:"
+echo "  git commit : $VERSION_SHORT"
+echo "  commit date: $VERSION_DATE"
+echo "  version    : $gitversion"
+echo "  output dir : $BUILD_DIR"
+echo ""
+echo "artifacts:"
+( cd "$BUILD_DIR" && for d in */; do
+      [ -d "$d" ] || continue
+      for f in "$d"*; do
+          [ -f "$f" ] || continue
+          printf '  %-28s %s\n' "$f" "$(file -b "$f" | cut -c1-60)"
+      done
+  done )
 echo ""
 
-# 显示构建信息
-echo "📋 构建统计:"
-echo "   Git 哈希: $VERSION_SHORT"
-echo "   构建日期: $VERSION_DATE"
-echo "   版本格式: $gitversion"
-echo "   产物目录: $BUILD_DIR"
-
-# 压缩输出
-echo "📦 生成构建压缩文件..."
+# ---- tarball ----
+echo "packing..."
 tar -czf "./vrndis-go-build-${VERSION_SHORT}.tar.gz" -C "$BUILD_DIR" .
-echo "✅ 压缩包: ./vrndis-go-build-${VERSION_SHORT}.tar.gz"
+echo "tarball: ./vrndis-go-build-${VERSION_SHORT}.tar.gz"
 echo ""
-echo "🎉 所有构建完成!"
+echo "done!"

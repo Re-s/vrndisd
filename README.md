@@ -75,7 +75,7 @@ JSON 格式可手工编辑后 `service stop && service start` 生效。
 ./build/build.sh all
 
 # 确保有 WebSocket 支持，然后运行 STUN 服务器
-./build/bin/stun-server/stun-server --listen :3478
+./build/bin/stun-server/stun-server --listen :5478
 ```
 
 ## 构建
