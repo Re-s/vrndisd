@@ -277,6 +277,7 @@ func cmdService(args []string) error {
 	hbInterval := fs.Duration("heartbeat-interval", 0, "client: 心跳发送间隔（0=默认 10s）")
 	hbTimeout := fs.Duration("heartbeat-timeout", 0, "client: 心跳超时阈值（0=默认 30s）")
 	stunServer := fs.String("stun-server", "", "client: STUN 服务器地址（P2P 时使用，默认用服务器地址）")
+	psk := fs.String("psk", "", "预共享密钥（非空时启用加密握手，server/client 通用）")
 	output := fs.String("output", "", "export: 写入的目标文件（默认打印到 stdout）")
 	printCfg := fs.Bool("print-config", false, "install: 仅打印将写入的配置 JSON，不安装服务")
 	fs.Parse(args[1:])
@@ -327,6 +328,8 @@ func cmdService(args []string) error {
 				cfg.HeartbeatTimeout = service.Duration(*hbTimeout)
 			case "stun-server":
 				cfg.STUNServer = *stunServer
+			case "psk":
+				cfg.PSK = *psk
 			}
 		})
 		if err := cfg.Validate(); err != nil {

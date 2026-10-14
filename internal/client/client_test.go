@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"vrndis/internal/crypto"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
 )
@@ -290,5 +291,96 @@ func TestClientDeviceSendToServer(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not receive device frame")
+	}
+}
+
+// writeEnvelope 服务器侧：把 [真实类型]+[真实body] 加密成信封消息发出。
+func writeEnvelope(t *testing.T, conn net.Conn, sec *crypto.SecureConn, typ byte, body []byte) {
+	t.Helper()
+	plain := append([]byte{typ}, body...)
+	cipher, err := sec.Encrypt(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proto.WriteMessage(conn, proto.TypeData, cipher); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readEnvelope 服务器侧：读取并解密客户端发来的信封消息，返回真实类型与 body。
+func readEnvelope(t *testing.T, conn net.Conn, sec *crypto.SecureConn) (byte, []byte) {
+	t.Helper()
+	msg, err := proto.ReadMessage(conn)
+	if err != nil {
+		t.Fatalf("read envelope: %v", err)
+	}
+	plain, err := sec.Decrypt(msg.Body)
+	if err != nil {
+		t.Fatalf("decrypt envelope: %v", err)
+	}
+	if len(plain) == 0 {
+		t.Fatal("empty envelope")
+	}
+	return plain[0], plain[1:]
+}
+
+// TestClientEncryptedPingDispatch 回归：加密信封模式下，控制消息（PING，空 body）
+// 必须被正确 dispatch（应答 PONG），不得被当作数据帧写入网卡——
+// 修复前 sockToDev 在解密前判断外层类型，空 body 的 PING 经 dev.Write 触发
+// Linux TUN EINVAL 导致连接被关闭。
+func TestClientEncryptedPingDispatch(t *testing.T) {
+	dev := tap.NewFake("c")
+	pongCh := make(chan struct{}, 1)
+	addr, stop := fakeServer(t, func(conn net.Conn) {
+		sec, err := crypto.ServerHandshake(conn, []byte("psk-regress"), proto.ProtocolVersion)
+		if err != nil {
+			return
+		}
+		// 读 HELLO（信封）
+		if typ, _ := readEnvelope(t, conn, sec); typ != proto.TypeHello {
+			t.Errorf("期望 HELLO，收到 %s", proto.TypeName(typ))
+		}
+		// 下发 ASSIGN（信封）
+		writeEnvelope(t, conn, sec, proto.TypeAssign, mustJSON(proto.Assignment{
+			Version: 1, IP: "10.77.0.2", Prefix: 24, Gateway: "10.77.0.1",
+			MAC: "02:00:00:00:00:01", ServerMAC: "02:00:00:00:00:00",
+		}))
+		time.Sleep(80 * time.Millisecond)
+		// 发 PING（空 body）——修复前会触发客户端 dev.Write(0 字节)
+		writeEnvelope(t, conn, sec, proto.TypePing, nil)
+		// 读应答：解包后应为 PONG
+		if typ, body := readEnvelope(t, conn, sec); typ == proto.TypePong && len(body) == 0 {
+			pongCh <- struct{}{}
+		}
+		// 保持连接存活，让客户端跑够心跳间隔
+		for {
+			if _, err := proto.ReadMessage(conn); err != nil {
+				return
+			}
+		}
+	})
+	defer stop()
+
+	c := New(Config{
+		Server:       addr,
+		PSK:          []byte("psk-regress"),
+		TapName:      "c",
+		DialTimeout:  2 * time.Second,
+		Device:       dev,
+	})
+	if _, err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	select {
+	case <-pongCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("加密模式下客户端未应答 PONG（控制消息被误当数据帧）")
+	}
+	// 等待足够时间确认客户端未因空帧断线；此时连接应仍然存活。
+	time.Sleep(300 * time.Millisecond)
+	if c.Closed() {
+		t.Fatal("连接已断开（PING 被误写网卡导致 EINVAL）")
 	}
 }

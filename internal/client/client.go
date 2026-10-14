@@ -674,18 +674,25 @@ func (c *Client) sockToDev(conn net.Conn) {
 			c.teardownConn(conn)
 			return
 		}
+		// 加密信封：启用 PSK 时所有消息以 TypeData 外层类型传输，
+		// 密文 = 加密([真实类型]+[真实body])。先解包还原真实类型，再 dispatch；
+		// 否则控制消息（Ping/BYE 等空 body 消息）会被误当数据帧写网卡。
+		if c.crypto != nil && msg.Type == proto.TypeData {
+			plaintext, err := c.crypto.Decrypt(msg.Body)
+			if err != nil {
+				c.logger.Printf("vrndis client: 解密失败: %v", err)
+				c.teardownConn(conn)
+				return
+			}
+			if len(plaintext) == 0 {
+				c.teardownConn(conn)
+				return
+			}
+			msg.Type = plaintext[0]
+			msg.Body = plaintext[1:]
+		}
 		switch msg.Type {
 		case proto.TypeData:
-			if c.crypto != nil {
-				plaintext, err := c.crypto.Decrypt(msg.Body)
-				if err != nil {
-					c.logger.Printf("vrndis client: 解密失败: %v", err)
-					c.teardownConn(conn)
-					return
-				}
-				msg.Type = plaintext[0]
-				msg.Body = plaintext[1:]
-			}
 			if err := c.dev.Write(msg.Body); err != nil {
 				if errors.Is(err, tap.ErrBufferFull) {
 					// 背压：网卡队列已满，丢帧继续，不断连（与服务器 tapWriter 一致）。
