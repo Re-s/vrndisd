@@ -91,8 +91,14 @@
    （信封模式：`[type]+body` 加密后以 `TypeData` 透明传输）。
 3. **保活** ✅：KEEPALIVE 主动心跳（客户端周期发送，NAT 环境保活）。
 4. **Windows 运行时验证** ✅：Windows Server 2025 上 wintun 数据面 + SCM 服务全生命周期
-   实测通过（ARP 注入修复后 ping 网关 0% 丢包）。
+   实测通过（ARP 注入修复后 ping 网关 0% 丢包；100 包 + 1400B 大帧压力均 0% 丢包；
+   跨多个心跳周期连接稳定）。
+5. **限速** ⛔ 已移除：暂不规划（见 git revert 98f0a4a），代码与文档均已清除。
 6. **P2P 打洞竞态** ✅：`internal/p2p` 首探测立即发送，修复双方互收探测时的活锁。
+7. **加密信封控制消息 dispatch** ✅（Windows 实测发现并修复）：
+   客户端 sockToDev 曾在解密前判断外层类型，启用 PSK 后空 body 的控制消息
+   （PING 等）被误当数据帧写网卡，Linux TUN EINVAL 导致连接约 10s（心跳周期）
+   后断线。修复为解包后按真实类型 dispatch（回归测试 TestClientEncryptedPingDispatch）。
 
 ## 8. 执行手册
 
