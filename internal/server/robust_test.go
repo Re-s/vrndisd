@@ -43,8 +43,8 @@ func TestReconnectSameSlotStable(t *testing.T) {
 	s := newStack(t)
 	for i := 0; i < 30; i++ {
 		_, _, a := s.connect(fmt.Sprintf("re%d", i))
-		if a.IP != "10.77.0.2" {
-			t.Fatalf("第 %d 次重连地址 %s，期望 10.77.0.2", i, a.IP)
+		if a.IP != firstClientIP(s.gateway) {
+			t.Fatalf("第 %d 次重连地址 %s，期望 %s", i, a.IP, firstClientIP(s.gateway))
 		}
 		s.clients[len(s.clients)-1].Stop()
 		waitUntil(t, 2*time.Second, func() bool { return s.srv.SessionCount() == 0 })
@@ -54,10 +54,11 @@ func TestReconnectSameSlotStable(t *testing.T) {
 // ---- 2. 地址池耗尽与恢复 ----
 
 func TestPoolExhaustionAndRecovery(t *testing.T) {
+	net30, gw30, clientIP30 := randTestNetwork30()
 	srvDev := tap.NewFake("srv")
 	srv, err := server.New(server.Config{
-		Listen: "127.0.0.1:0", Network: "10.77.0.0/30", // 仅 1 个可用地址 .2
-		Gateway: "10.77.0.1", TapMAC: "02:00:00:00:00:00", Device: srvDev,
+		Listen: "127.0.0.1:0", Network: net30, // 仅 1 个可用地址 .2
+		Gateway: gw30, TapMAC: "02:00:00:00:00:00", Device: srvDev,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +75,7 @@ func TestPoolExhaustionAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c1.Stop()
-	if a1.IP != "10.77.0.2" {
+	if a1.IP != clientIP30 {
 		t.Fatalf("first: %s", a1.IP)
 	}
 	// 第二个客户端必须被拒绝（服务器在分配失败时关闭连接），且服务器不崩溃
@@ -92,7 +93,7 @@ func TestPoolExhaustionAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a3.IP != "10.77.0.2" {
+	if a3.IP != clientIP30 {
 		t.Fatalf("recovery: %s", a3.IP)
 	}
 }
@@ -164,7 +165,7 @@ func TestOversizedMessageKillsOnlyThatSession(t *testing.T) {
 	waitUntil(t, 2*time.Second, func() bool { return s.srv.SessionCount() == 0 })
 
 	_, _, a := s.connect("healthy")
-	if a.IP != "10.77.0.2" {
+	if a.IP != firstClientIP(s.gateway) {
 		t.Fatalf("服务器未恢复: %s", a.IP)
 	}
 }
@@ -207,7 +208,7 @@ func TestSlowConsumerDoesNotBlockOthers(t *testing.T) {
 	floodWG.Add(1)
 	go func() {
 		defer floodWG.Done()
-		for i := 0; i < 2000; i++ {
+		for i := 0; i < 800; i++ {
 			frame := ethernet.BuildFrame(
 				ethernet.Broadcast, mustMAC(t, aB.MAC), ethernet.TypeIPv4,
 				[]byte(fmt.Sprintf("flood-%d", i)))

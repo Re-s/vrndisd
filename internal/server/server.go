@@ -13,8 +13,10 @@ import (
 	"sync/atomic"
 
 	"vrndis/internal/addr"
+	"vrndis/internal/crypto"
 	"vrndis/internal/ethernet"
 	"vrndis/internal/ethswitch"
+	"vrndis/internal/throttle"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
 )
@@ -35,8 +37,13 @@ type Config struct {
 	MTU     int
 	Device  tap.Device // 可选：注入设备（测试用），为 nil 时创建真实 TAP
 
+	PSK     []byte // 预共享密钥；非空时要求客户端先完成加密握手
+
 	// P2P 是否开启 P2P 直连（默认关闭，纯中继，兼容旧客户端）
 	P2P bool
+
+	// MaxRate 单客户端每秒最大入站帧数（令牌桶限速，0=不限速）
+	MaxRate int
 }
 
 // DefaultConfig 默认配置。
@@ -115,11 +122,23 @@ type session struct {
 	outQ    chan []byte // 有界发送队列：慢消费者只丢自己的帧，不阻塞交换机
 	done    chan struct{}
 	dropped atomic.Uint64
+	crypto     *crypto.SecureConn   // 加密通道（PSK 握手后非 nil）
+	limiter    *throttle.Limiter   // 入站限速（nil=未启用）
+	rateDropped atomic.Uint64     // 限速丢帧计数
 }
 
 func (s *session) send(typ byte, body []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.crypto != nil {
+		// 信封模式：[type]+body 整体加密，外层统一 TypeData
+		plaintext := append([]byte{typ}, body...)
+		encrypted, err := s.crypto.Encrypt(plaintext)
+		if err != nil {
+			return err
+		}
+		return proto.WriteMessage(s.conn, proto.TypeData, encrypted)
+	}
 	return proto.WriteMessage(s.conn, typ, body)
 }
 
@@ -138,7 +157,16 @@ func (s *session) writer() {
 		select {
 		case frame := <-s.outQ:
 			s.writeMu.Lock()
-			err := proto.WriteMessage(s.conn, proto.TypeData, frame)
+			outFrame := frame
+			if s.crypto != nil {
+				// 信封模式：[TypeData]+frame 整体加密
+				plaintext := append([]byte{proto.TypeData}, frame...)
+				encrypted, encErr := s.crypto.Encrypt(plaintext)
+				if encErr == nil {
+					outFrame = encrypted
+				}
+			}
+			err := proto.WriteMessage(s.conn, proto.TypeData, outFrame)
 			s.writeMu.Unlock()
 			if err != nil {
 				return
@@ -216,6 +244,21 @@ func (s *Server) Start() error {
 	}
 	s.dev = dev
 	s.tapQ = make(chan []byte, 512)
+
+	// Windows wintun 为三层驱动：ARP 帧由 l2l3 拦截并构造 Reply，
+	// 需要通过交换机把 ARP Reply 送回发起请求的客户端。
+	// 若不注入，ARP Reply 被静默丢弃，客户端无法解析网关 MAC（ping 不通）。
+	if arper, ok := dev.(interface{ SetARPInject(func(frame []byte)) }); ok {
+		arper.SetARPInject(func(frame []byte) {
+			f, err := ethernet.ParseFrame(frame)
+			if err != nil {
+				return
+			}
+			s.sw.Learn(f.Src, tapPort)
+			targets := s.sw.Forward(f.Dst, tapPort, s.allPorts())
+			s.deliver(frame, targets)
+		})
+	}
 	if err := dev.SetMAC(s.tapMAC); err != nil {
 		return fmt.Errorf("set tap mac: %w", err)
 	}
@@ -346,6 +389,17 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	peer := conn.RemoteAddr().String()
+	var sec *crypto.SecureConn
+	if len(s.cfg.PSK) > 0 {
+		var err error
+		sec, err = crypto.ServerHandshake(conn, s.cfg.PSK, proto.ProtocolVersion)
+		if err != nil {
+			s.logger.Printf("vrndis server: 加密握手失败 %s: %v", peer, err)
+			conn.Close()
+			return
+		}
+		s.logger.Printf("vrndis server: 加密连接建立 %s", peer)
+	}
 	lease, err := s.pool.Allocate()
 	if err != nil {
 		s.logger.Printf("vrndis server: 无法为 %s 分配地址: %v", peer, err)
@@ -358,6 +412,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		lease: lease, macKey: macKey,
 		outQ: make(chan []byte, 512),
 		done: make(chan struct{}),
+		crypto: sec,
+	}
+	if s.cfg.MaxRate > 0 {
+		sess.limiter = throttle.New(s.cfg.MaxRate, s.cfg.MaxRate*2)
 	}
 	var writerWG sync.WaitGroup
 	writerWG.Add(1)
@@ -404,6 +462,20 @@ func (s *Server) handleConn(conn net.Conn) {
 		if err != nil {
 			s.logger.Printf("vrndis server: 客户端 %s 断开: %v", peer, err)
 			return
+		}
+		if sess.crypto != nil && len(msg.Body) > 0 {
+			plain, decErr := sess.crypto.Decrypt(msg.Body)
+			if decErr != nil {
+				s.logger.Printf("vrndis server: 解密失败 %s: %v", peer, decErr)
+				return
+			}
+			if len(plain) == 0 {
+				s.logger.Printf("vrndis server: 解密得到空数据 %s", peer)
+				return
+			}
+			// 解包信封：plain[0]=真实类型, plain[1:]=真实body
+			msg.Type = plain[0]
+			msg.Body = plain[1:]
 		}
 		switch msg.Type {
 		case proto.TypeData:
@@ -510,6 +582,11 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 }
 
 func (s *Server) handleClientFrame(sess *session, frame []byte) {
+	// 限速检查：超出速率的帧直接丢弃，不影响其他客户端
+	if sess.limiter != nil && !sess.limiter.Allow() {
+		sess.rateDropped.Add(1)
+		return
+	}
 	f, err := ethernet.ParseFrame(frame)
 	if err != nil {
 		return // 畸形帧直接丢弃，绝不影响连接

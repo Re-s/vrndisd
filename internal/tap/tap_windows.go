@@ -229,7 +229,14 @@ func (t *windowsTAP) Write(frame []byte) error {
 }
 
 // SetMAC wintun 适配器 MAC 由驱动管理，此为空操作（记录语义在上层）。
-func (t *windowsTAP) SetMAC(mac net.HardwareAddr) error { return nil }
+func (t *windowsTAP) SetMAC(mac net.HardwareAddr) error {
+	// wintun 网卡 MAC 由驱动随机生成，无法真正设置；
+	// 但需记录隧道侧标识，供 l2l3 封装/ARP 应答使用。
+	t.mu.Lock()
+	t.localMAC = append(net.HardwareAddr(nil), mac...)
+	t.mu.Unlock()
+	return nil
+}
 
 func (t *windowsTAP) SetIPv4(ip net.IP, prefix int) error {
 	mask := net.IP(net.CIDRMask(prefix, 32)).String()
@@ -239,6 +246,10 @@ func (t *windowsTAP) SetIPv4(ip net.IP, prefix int) error {
 	if err != nil {
 		return fmt.Errorf("netsh set address: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
+	// 记录本机 IP，供 l2l3 ARP 应答判断（ARP 请求的 TPA == localIP 时应答）。
+	t.mu.Lock()
+	t.localIP = append(net.IP(nil), ip.To4()...)
+	t.mu.Unlock()
 	return nil
 }
 

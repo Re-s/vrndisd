@@ -15,6 +15,10 @@ Go 重写版：**单文件静态二进制**，性能更好、可交叉编译 Win
   - 会话与 TAP 写入均为**有界队列（512 帧）**，慢消费者/慢内核只丢自己的帧，绝不拖死全网
   - 畸形帧、垃圾消息、未知类型、超长声明全部容错（协议层 fuzz 测试覆盖）
   - 断线即回收租约，地址优先复用；协程/资源零泄漏（有回归测试）
+  - MAC 表上限 4096 + 300s 老化 + LRU 淘汰（防源 MAC 洪泛撑爆表）
+- **安全**：可选 PSK 鉴权加密（`--psk`，X25519 ECDH + AES-256-GCM，控制面消息整体加密）
+- **限速**：可选单客户端入站限速（`--max-rate`，令牌桶，超限丢帧计数）
+- **保活心跳**：客户端周期 KEEPALIVE，NAT 环境长连接不断
 - **服务化**：`vrndisd service install` 一条命令装成 systemd / Windows 服务（开机自启、崩溃自拉）
 - **Linux/Windows**：数据面 Linux TAP（/dev/net/tun）/ Windows wintun；服务工具双平台
 
@@ -143,7 +147,7 @@ Linux 单元特性：`Restart=always`（3s 后拉起）、`TimeoutStopSec=10`（
 
 - 数据面**明文 TCP，无认证**——仅适用于可信网络；跨公网请套 SSH/WireGuard/TLS 隧道
 - 服务以 root/管理员运行（TAP 需要），请限制可连接来源 IP
-- 健壮性测试规划与已知加固待办见 `docs/robustness-plan.md`（鉴权、MAC 表老化、限速等）
+- 健壮性测试规划见 `docs/robustness-plan.md`（鉴权加密、MAC 表老化、限速等加固项已全部实现并验证）
 
 ## 文件结构
 

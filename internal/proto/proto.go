@@ -26,6 +26,9 @@ const (
 	// 新增 P2P 消息类型
 	TypeP2PAdvertise  byte = 9  // 客户端 -> 服务器：上报本机候选（NAT 映射地址）
 	TypePeerCandidate byte = 10 // 服务器 -> 客户端：下发对端 MAC + 候选地址
+	// 加密握手消息类型（v3 协议，在 HELLO/ASSIGN 之前协商）
+	TypeCryptoHello byte = 11 // 客户端 -> 服务器：E_KC + 版本号
+	TypeCryptoAck   byte = 12 // 服务器 -> 客户端：E_KS + HMAC-PSK
 )
 
 // MaxBody 单条消息体上限（256 KiB，容纳超长帧）。
@@ -35,7 +38,8 @@ const MaxBody = 256 * 1024
 //
 //	1: 纯中继（服务器经 TCP + 学习型交换机转发所有帧）
 //	2: 加入 P2P 直连（客户端上报候选、服务器协调交换、打洞失败回退中继）
-const ProtocolVersion = 2
+//	3: 加入线路加密（PSK + 一次性 ECDH 握手，AES-256-GCM 数据面加密）
+const ProtocolVersion = 3
 
 var (
 	ErrTooLarge   = errors.New("vrndis/proto: message body too large")
@@ -71,6 +75,10 @@ func TypeName(t byte) string {
 		return "P2P_ADV"
 	case TypePeerCandidate:
 		return "PEER_CAND"
+	case TypeCryptoHello:
+		return "CRYPTO_HELLO"
+	case TypeCryptoAck:
+		return "CRYPTO_ACK"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}

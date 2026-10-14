@@ -81,6 +81,16 @@ func punchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDP
 	dbg.Printf("start, candidates=%v", peerCandidates)
 
 	sentOnce := false
+	// 立即发一轮探测：避免等待首个 ticker（100ms）期间收到对端探测
+	// 却因 sentOnce=false 被丢弃，造成双方互丢的活锁。
+	for _, cand := range peerCandidates {
+		if cand == nil {
+			continue
+		}
+		if _, werr := conn.WriteToUDP(probeMagic, cand); werr == nil {
+			sentOnce = true
+		}
+	}
 	// 持续向候选地址发探测（间隔可控），直到打通或 ctx 结束。
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()

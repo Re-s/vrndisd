@@ -22,15 +22,17 @@ type stack struct {
 	srvDev  *tap.Fake
 	clients []*client.Client
 	devs    []*tap.Fake
+	gateway string // 测试网段网关（随机生成）
 }
 
 func newStack(t *testing.T) *stack {
 	t.Helper()
 	srvDev := tap.NewFake("srv")
+	network, gateway := randTestNetwork()
 	srv, err := server.New(server.Config{
 		Listen:  "127.0.0.1:0",
-		Network: "10.77.0.0/24",
-		Gateway: "10.77.0.1",
+		Network: network,
+		Gateway: gateway,
 		TapMAC:  "02:00:00:00:00:00",
 		Device:  srvDev,
 	})
@@ -40,7 +42,7 @@ func newStack(t *testing.T) *stack {
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	s := &stack{t: t, srv: srv, srvDev: srvDev}
+	s := &stack{t: t, srv: srv, srvDev: srvDev, gateway: gateway}
 	t.Cleanup(func() {
 		for _, c := range s.clients {
 			c.Stop()
@@ -113,7 +115,7 @@ func waitUntil(t *testing.T, d time.Duration, cond func() bool) {
 func TestAssignmentFromServer(t *testing.T) {
 	s := newStack(t)
 	_, dev, a := s.connect("cli")
-	if a.IP != "10.77.0.2" || a.Prefix != 24 || a.Gateway != "10.77.0.1" {
+	if a.IP != firstClientIP(s.gateway) || a.Prefix != 24 || a.Gateway != s.gateway {
 		t.Fatalf("assignment: %+v", a)
 	}
 	if a.MAC != "02:00:00:00:00:01" || a.ServerMAC != "02:00:00:00:00:00" {
@@ -122,7 +124,7 @@ func TestAssignmentFromServer(t *testing.T) {
 	if a.MTU != 1500 || len(a.DNS) == 0 {
 		t.Fatalf("mtu/dns: %+v", a)
 	}
-	if dev.MAC.String() != a.MAC || dev.IPv4 != "10.77.0.2/24" || !dev.UpFlag {
+	if dev.MAC.String() != a.MAC || dev.IPv4 != firstClientIP(s.gateway)+"/24" || !dev.UpFlag {
 		t.Fatalf("本地网卡配置错误: %+v", dev)
 	}
 }
@@ -201,7 +203,7 @@ func TestARPHandshakeOverTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if arp.TPA.String() != "10.77.0.1" || arp.SPA.String() != "10.77.0.2" {
+	if arp.TPA.String() != s.gateway || arp.SPA.String() != a.IP {
 		t.Fatalf("ARP 请求内容: %+v", arp)
 	}
 	reply := ethernet.ARPReply(
@@ -223,13 +225,13 @@ func TestARPHandshakeOverTunnel(t *testing.T) {
 func TestLeaseReleasedOnDisconnect(t *testing.T) {
 	s := newStack(t)
 	c1, _, a1 := s.connect("c1")
-	if a1.IP != "10.77.0.2" {
+	if a1.IP != firstClientIP(s.gateway) {
 		t.Fatalf("first lease: %s", a1.IP)
 	}
 	c1.Stop()
 	waitUntil(t, 2*time.Second, func() bool { return s.srv.SessionCount() == 0 })
 	_, _, a2 := s.connect("c2")
-	if a2.IP != "10.77.0.2" {
+	if a2.IP != firstClientIP(s.gateway) {
 		t.Fatalf("释放的地址应复用，got %s", a2.IP)
 	}
 }

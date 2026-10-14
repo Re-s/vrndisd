@@ -27,6 +27,8 @@ import (
 	"vrndis/internal/p2p"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
+
+	"vrndis/internal/crypto"
 )
 
 // 默认心跳参数。
@@ -57,6 +59,9 @@ type Config struct {
 	// 主动心跳（客户端 Ping → 服务器 Pong）。
 	HeartbeatInterval time.Duration // 心跳发送间隔，0 = 默认 10s
 	HeartbeatTimeout  time.Duration // 心跳超时，0 = 默认 30s
+
+	// 加密。
+	PSK []byte // 预共享密钥；非 nil 时与服务器握手加密
 }
 
 // Client 虚拟 RNDIS 客户端。
@@ -75,6 +80,7 @@ type Client struct {
 	connOnce sync.Once     // 保证 connDone 只关闭一次
 	connWG   sync.WaitGroup
 	writeMu  sync.Mutex
+	crypto   *crypto.SecureConn
 
 	assignMu sync.RWMutex
 	assign   *proto.Assignment
@@ -127,8 +133,21 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
+
+	// 加密握手（可选）：如果客户端配置了 PSK，则必须先完成加密握手。
+	if len(c.cfg.PSK) > 0 {
+		secure, err := crypto.ClientHandshake(conn, c.cfg.PSK, proto.ProtocolVersion)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("握手失败: %w", err)
+		}
+		c.crypto = secure
+		c.logger.Printf("vrndis client: 加密握手成功")
+	}
+
 	helloBody, _ := json.Marshal(proto.Hello{Version: proto.ProtocolVersion, Name: c.cfg.Name})
-	if err := proto.WriteMessage(conn, proto.TypeHello, helloBody); err != nil {
+	// Hello 也走加密信封（c.send 内部处理 crypto 逻辑）
+	if err := c.send(conn, proto.TypeHello, helloBody); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -136,6 +155,15 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("read assignment: %w", err)
+	}
+	if c.crypto != nil {
+		plaintext, err := c.crypto.Decrypt(msg.Body)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("解密 ASSIGN: %w", err)
+		}
+		msg.Type = plaintext[0]
+		msg.Body = plaintext[1:]
 	}
 	if msg.Type != proto.TypeAssign {
 		conn.Close()
@@ -221,6 +249,14 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 			c.connMu.Unlock()
 			if conn == nil {
 				return // 未连接，丢弃
+			}
+			if c.crypto != nil {
+				plaintext := append([]byte{proto.TypeData}, frame...)
+				var err error
+				frame, err = c.crypto.Encrypt(plaintext)
+				if err != nil {
+					return
+				}
 			}
 			c.writeMu.Lock()
 			err := proto.WriteMessage(conn, proto.TypeData, frame)
@@ -605,6 +641,14 @@ func (c *Client) Closed() bool {
 func (c *Client) send(conn net.Conn, typ byte, body []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.crypto != nil {
+		plaintext := append([]byte{typ}, body...)
+		frame, err := c.crypto.Encrypt(plaintext)
+		if err != nil {
+			return err
+		}
+		return proto.WriteMessage(conn, proto.TypeData, frame)
+	}
 	return proto.WriteMessage(conn, typ, body)
 }
 
@@ -632,6 +676,16 @@ func (c *Client) sockToDev(conn net.Conn) {
 		}
 		switch msg.Type {
 		case proto.TypeData:
+			if c.crypto != nil {
+				plaintext, err := c.crypto.Decrypt(msg.Body)
+				if err != nil {
+					c.logger.Printf("vrndis client: 解密失败: %v", err)
+					c.teardownConn(conn)
+					return
+				}
+				msg.Type = plaintext[0]
+				msg.Body = plaintext[1:]
+			}
 			if err := c.dev.Write(msg.Body); err != nil {
 				if errors.Is(err, tap.ErrBufferFull) {
 					// 背压：网卡队列已满，丢帧继续，不断连（与服务器 tapWriter 一致）。
@@ -745,6 +799,16 @@ func (c *Client) devToSock() {
 		if conn == nil {
 			continue // 未连接，丢帧
 		}
+		if c.crypto != nil {
+			plaintext := append([]byte{proto.TypeData}, frame...)
+			var err error
+			frame, err = c.crypto.Encrypt(plaintext)
+			if err != nil {
+				c.logger.Printf("vrndis client: 加密失败: %v", err)
+				continue
+			}
+		}
+		c.logger.Printf("vrndis client: devToSock 写入 %d 字节 (crypto=%v)", len(frame), c.crypto != nil)
 		c.writeMu.Lock()
 		err = proto.WriteMessage(conn, proto.TypeData, frame)
 		c.writeMu.Unlock()

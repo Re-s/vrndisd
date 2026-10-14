@@ -55,7 +55,7 @@
 | 4.3b | 极端微爆发（8ms 内 900 帧） | 允许背压丢帧（交换机过载语义），但不得死锁/饿死/服务不可用 | `TestBurstNeverDeadlocks` |
 | 4.4 | 8KiB 大帧透传 | 逐字节一致 | `TestLargeFramePassthrough` |
 | 4.5 | 双重释放租约 | 池不膨胀、无 double-free | `TestDoubleReleaseSafe`（L1） |
-| 4.6 | MAC 表膨胀（伪造源 MAC 洪泛） | 见 §7 待办：需加 MAC 表上限 + 老化 | 规划中 |
+| 4.6 | MAC 表膨胀（伪造源 MAC 洪泛） | 表上限 4096 + 300s 老化 + LRU 淘汰，超限逐出最旧条目 | `TestMacTableEviction`（L1）✅ |
 
 **背压策略（设计保证）**：每个客户端会话持有 512 帧有界发送队列；队列满时丢帧计数，
 交换机永不因单个慢客户端阻塞。真实 TAP 写入由内核消费，不存在同等问题。
@@ -76,21 +76,24 @@
 
 | # | 用例 | Linux | Windows |
 |---|---|---|---|
-| 6.1 | install → status=running | systemd 实测 ✅ | sc.exe 编译验证 + 待 Windows 主机实测 |
-| 6.2 | stop / start 循环 ×10 | 实测 ✅ | 待测 |
-| 6.3 | uninstall 后无残留（unit/注册表/进程） | 实测 ✅ | 待测 |
+| 6.1 | install → status=running | systemd 实测 ✅ | Windows Server 2025 SCM 实测 ✅ |
+| 6.2 | stop / start 循环 ×10 | 实测 ✅ | SCM start/stop 实测 ✅ |
+| 6.3 | uninstall 后无残留（unit/注册表/进程） | 实测 ✅ | 实测 ✅ |
 | 6.4 | 配置文件错误（非法 JSON / mode 错误） | 明确报错退出，服务 fail 状态可查 | 同 |
 | 6.5 | 非 root / 非管理员运行 | 明确报错（TAP 权限） | 同 |
 
-## 7. 已知待办（后续加固项）
+## 7. 加固项完成情况（原待办，已全部实现 ✅）
 
-1. **MAC 表上限与老化**：伪造源 MAC 洪泛可撑爆交换机表（内存耗尽缓慢）。
-   计划：表上限（如 4096）+ 300s 老化 + LRU 淘汰。
-2. **鉴权与加密**：当前明文 TCP 无认证（已在 README 标注）。计划：TLS + 预共享密钥握手。
-3. **保活**：KEEPALIVE 消息已定义但未启用主动心跳；NAT 环境长连接需心跳保活。
-4. **Windows 运行时验证**：wintun 数据面 + SCM 接入均已交叉编译通过，
-   需要 Windows 主机跑 §6 矩阵（wintun.dll 随包分发）。
-5. **限速**：单客户端发送速率无上限（内网场景可接受；公网需令牌桶）。
+1. **MAC 表上限与老化** ✅：`internal/ethswitch` 表上限 4096 + 300s 老化 + LRU 淘汰
+   （`NewWithConfig(max, aging, autoCleanup)`，Lookup/Forward 自动清理过期条目）。
+2. **鉴权与加密** ✅：X25519 ECDH + PSK + AES-256-GCM（`internal/crypto`）。
+   服务器 `--psk` 启用；握手在地址分配前完成，失败即拒绝。控制面消息整体加密
+   （信封模式：`[type]+body` 加密后以 `TypeData` 透明传输）。
+3. **保活** ✅：KEEPALIVE 主动心跳（客户端周期发送，NAT 环境保活）。
+4. **Windows 运行时验证** ✅：Windows Server 2025 上 wintun 数据面 + SCM 服务全生命周期
+   实测通过（ARP 注入修复后 ping 网关 0% 丢包）。
+5. **限速** ✅：令牌桶限速器（`internal/throttle`，`--max-rate`，超限丢帧计数 `rateDropped`）。
+6. **P2P 打洞竞态** ✅：`internal/p2p` 首探测立即发送，修复双方互收探测时的活锁。
 
 ## 8. 执行手册
 
@@ -109,9 +112,10 @@ go test ./internal/ethernet/ -fuzz=FuzzParseFrame -fuzztime=30s
 sudo bash tests/stress-real.sh          # netns 多客户端 + 吞吐 + 丢包
 sudo bash tests/reconnect-loop.sh       # 100 次 kill -9 重连循环
 
-# L6 长稳（服务模式）
-sudo ./vrndisd service install --mode server --listen 0.0.0.0:7777
-# 观察 24h：内存曲线（pidstat -r）、连接数、丢帧计数
+# L6 长稳（独立端口 17777 + 独立网段 10.250.0.0/24，不影响生产服务）
+sudo bash tests/soak.sh /path/to/vrndisd 86400 30     # 24h，每 30s 重连
+# 实时查看：tail -f /tmp/vrndis-soak/mem.csv
+# 报告：/tmp/vrndis-soak/report.txt（RSS 变化、线程数、PASS/WARN 结论）
 ```
 
 **通过标准**：L1-L3 全绿；L4 fuzz 30min 无 crash；L5 丢包 0%、重连 100/100 成功；
