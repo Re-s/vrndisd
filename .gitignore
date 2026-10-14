@@ -15,3 +15,4 @@ test_output/
 # OS
 .DS_Store
 Thumbs.db
+vrndis-go-build-*.tar.gz

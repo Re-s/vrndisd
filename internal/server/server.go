@@ -16,7 +16,6 @@ import (
 	"vrndis/internal/crypto"
 	"vrndis/internal/ethernet"
 	"vrndis/internal/ethswitch"
-	"vrndis/internal/throttle"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
 )
@@ -42,8 +41,6 @@ type Config struct {
 	// P2P 是否开启 P2P 直连（默认关闭，纯中继，兼容旧客户端）
 	P2P bool
 
-	// MaxRate 单客户端每秒最大入站帧数（令牌桶限速，0=不限速）
-	MaxRate int
 }
 
 // DefaultConfig 默认配置。
@@ -123,8 +120,6 @@ type session struct {
 	done    chan struct{}
 	dropped atomic.Uint64
 	crypto     *crypto.SecureConn   // 加密通道（PSK 握手后非 nil）
-	limiter    *throttle.Limiter   // 入站限速（nil=未启用）
-	rateDropped atomic.Uint64     // 限速丢帧计数
 }
 
 func (s *session) send(typ byte, body []byte) error {
@@ -414,9 +409,6 @@ func (s *Server) handleConn(conn net.Conn) {
 		done: make(chan struct{}),
 		crypto: sec,
 	}
-	if s.cfg.MaxRate > 0 {
-		sess.limiter = throttle.New(s.cfg.MaxRate, s.cfg.MaxRate*2)
-	}
 	var writerWG sync.WaitGroup
 	writerWG.Add(1)
 	go func() {
@@ -582,11 +574,6 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 }
 
 func (s *Server) handleClientFrame(sess *session, frame []byte) {
-	// 限速检查：超出速率的帧直接丢弃，不影响其他客户端
-	if sess.limiter != nil && !sess.limiter.Allow() {
-		sess.rateDropped.Add(1)
-		return
-	}
 	f, err := ethernet.ParseFrame(frame)
 	if err != nil {
 		return // 畸形帧直接丢弃，绝不影响连接

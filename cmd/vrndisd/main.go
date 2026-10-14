@@ -150,13 +150,11 @@ func cmdServer(args []string) error {
 	stun := fs.Bool("stun", false, "同时启动内置 STUN 服务器（NAT 穿透）")
 	stunListen := fs.String("stun-listen", ":5478", "STUN 监听地址（--stun 时生效）")
 	psk := fs.String("psk", "", "预共享密钥（非空时要求客户端加密握手）")
-	maxRate := fs.Int("max-rate", 0, "单客户端每秒最大入站帧数（令牌桶限速，0=不限）")
 	fs.Parse(args)
 	cfg.DNS = splitCSV(fs.Lookup("dns").Value.String())
 	if *psk != "" {
 		cfg.PSK = []byte(*psk)
 	}
-	cfg.MaxRate = *maxRate
 
 	srv, err := server.New(cfg)
 	if err != nil {
@@ -270,7 +268,6 @@ func cmdService(args []string) error {
 	stun := fs.Bool("stun", false, "server: 同时启动内置 STUN 服务器（NAT 穿透）")
 	stunListen := fs.String("stun-listen", ":5478", "server: STUN 监听地址（--stun 时生效）")
 	p2p := fs.Bool("p2p", false, "开启 P2P 直连（客户端间 NAT 穿透走 UDP，失败回退服务器中继）")
-	maxRate := fs.Int("max-rate", 0, "server: 单客户端每秒最大入站帧数（0=不限）")
 	serverAddr := fs.String("server", "", "client: 服务器地址 host:port")
 	name := fs.String("name", "", "client: 客户端名称（默认主机名）")
 	defRoute := fs.Bool("default-route", false, "client: 默认路由走隧道")
@@ -312,9 +309,7 @@ func cmdService(args []string) error {
 				cfg.STUNListen = *stunListen
 			case "p2p":
 				cfg.P2P = *p2p
-			case "max-rate":
-				cfg.MaxRate = *maxRate
-			case "server":
+						case "server":
 				cfg.Server = *serverAddr
 			case "name":
 				cfg.Name = *name
@@ -457,8 +452,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 				MTU:     cfg.MTU,
 				P2P:     cfg.P2P,
 				PSK:     []byte(cfg.PSK),
-				MaxRate: cfg.MaxRate,
-			})
+				})
 			if err != nil {
 				return err
 			}

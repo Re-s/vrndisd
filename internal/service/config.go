@@ -68,9 +68,6 @@ type Config struct {
 	// 加密
 	PSK string `json:"psk,omitempty"`
 
-	// 服务器侧：单客户端入站限速（帧/秒，0=不限）
-	MaxRate int `json:"max_rate,omitempty"`
-
 	// 客户端侧：P2P、STUN 与自愈参数。
 	STUNServer        string   `json:"stun_server,omitempty"`
 	Reconnect         bool     `json:"reconnect,omitempty"`

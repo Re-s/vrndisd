@@ -92,7 +92,6 @@
 3. **保活** ✅：KEEPALIVE 主动心跳（客户端周期发送，NAT 环境保活）。
 4. **Windows 运行时验证** ✅：Windows Server 2025 上 wintun 数据面 + SCM 服务全生命周期
    实测通过（ARP 注入修复后 ping 网关 0% 丢包）。
-5. **限速** ✅：令牌桶限速器（`internal/throttle`，`--max-rate`，超限丢帧计数 `rateDropped`）。
 6. **P2P 打洞竞态** ✅：`internal/p2p` 首探测立即发送，修复双方互收探测时的活锁。
 
 ## 8. 执行手册
