@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	DefaultMaxEntries   = 4096 // 最大 MAC 表条目数
+	DefaultMaxEntries   = 4096              // 最大 MAC 表条目数
 	DefaultAgingTime    = 300 * time.Second // 条目老化时间
-	DefaultCleanupRatio = 0.1                // 每次清理淘汰 10% 的旧条目
+	DefaultCleanupRatio = 0.1               // 每次清理淘汰 10% 的旧条目
 )
 
 // MacEntry 一个 MAC 表条目，包含端口和访问时间
@@ -28,11 +28,11 @@ type MacEntry struct {
 
 // LearningSwitch 支持上限和老化的学习型交换机。
 type LearningSwitch struct {
-	mu     sync.Mutex
-	table  map[string]*MacEntry // MAC 字符串 -> 条目
-	max    int                  // 最大条目数
-	aging  time.Duration        // 老化时间
-	clean  bool                 // 是否启用自动清理
+	mu    sync.Mutex
+	table map[string]*MacEntry // MAC 字符串 -> 条目
+	max   int                  // 最大条目数
+	aging time.Duration        // 老化时间
+	clean bool                 // 是否启用自动清理
 }
 
 // New 创建空交换机，使用默认配置。
@@ -43,10 +43,10 @@ func New() *LearningSwitch {
 // NewWithConfig 创建指定配置的交换机。
 func NewWithConfig(max int, aging time.Duration, autoCleanup bool) *LearningSwitch {
 	return &LearningSwitch{
-		table:   make(map[string]*MacEntry),
-		max:     max,
-		aging:   aging,
-		clean:   autoCleanup,
+		table: make(map[string]*MacEntry),
+		max:   max,
+		aging: aging,
+		clean: autoCleanup,
 	}
 }
 

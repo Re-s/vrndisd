@@ -475,6 +475,14 @@ func (c *Client) p2pConnect() {
 		return
 	}
 	c.setTunnel(tun, peer.MAC)
+	// 通知服务器打洞成功（仅管理面展示用，失败无碍）
+	if conn := c.currentConn(); conn != nil {
+		body, _ := json.Marshal(proto.P2PReady{
+			Version: proto.ProtocolVersion,
+			PeerMAC: peer.MAC.String(),
+		})
+		_ = c.send(conn, proto.TypeP2PReady, body)
+	}
 	c.logger.Printf("vrndis client: P2P 隧道已建立 -> %v", tun.Peer())
 
 	// 5) 空闲超时/断线 -> 自动回退 TCP 中继（二层不断连）

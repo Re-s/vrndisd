@@ -6,12 +6,12 @@
 package proto
 
 import (
-	"time"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 const (
@@ -26,6 +26,7 @@ const (
 	TypeManagement byte = 8
 	// 新增 P2P 消息类型
 	TypeP2PAdvertise  byte = 9  // 客户端 -> 服务器：上报本机候选（NAT 映射地址）
+	TypeP2PReady      byte = 13 // 客户端 -> 服务器：打洞成功，数据面已切 UDP 直连
 	TypePeerCandidate byte = 10 // 服务器 -> 客户端：下发对端 MAC + 候选地址
 	// 加密握手消息类型（v3 协议，在 HELLO/ASSIGN 之前协商）
 	TypeCryptoHello byte = 11 // 客户端 -> 服务器：E_KC + 版本号
@@ -74,6 +75,8 @@ func TypeName(t byte) string {
 		return "MANAGEMENT"
 	case TypeP2PAdvertise:
 		return "P2P_ADV"
+	case TypeP2PReady:
+		return "P2P_READY"
 	case TypePeerCandidate:
 		return "PEER_CAND"
 	case TypeCryptoHello:
@@ -169,11 +172,19 @@ type ClientInfo struct {
 	MAC  string `json:"mac"`
 	Peer string `json:"peer"`
 	Name string `json:"name"`
+	P2P  string `json:"p2p"` // P2P 状态：off / relay / stun-ok <候选> / p2p-ok <对端MAC>
 }
 
 func (ci ClientInfo) Serialize() []byte {
 	data, _ := json.Marshal(ci)
 	return data
+}
+
+// P2PReady 打洞成功通知（客户端 -> 服务器）。
+// 服务器据此在管理面（clients/status）展示该会话已切换 UDP 直连。
+type P2PReady struct {
+	Version int    `json:"version"`  // 协议版本，用于兼容
+	PeerMAC string `json:"peer_mac"` // 对端虚拟 MAC
 }
 
 // P2PAdvertise 客户端向服务器上报本机 NAT 候选（P2P 模式）。

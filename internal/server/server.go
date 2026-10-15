@@ -40,7 +40,7 @@ type Config struct {
 	MTU     int
 	Device  tap.Device // 可选：注入设备（测试用），为 nil 时创建真实 TAP
 
-	PSK     []byte // 预共享密钥；非空时要求客户端先完成加密握手
+	PSK []byte // 预共享密钥；非空时要求客户端先完成加密握手
 
 	// P2P 是否开启 P2P 直连（默认关闭，纯中继，兼容旧客户端）
 	P2P bool
@@ -94,8 +94,8 @@ type Server struct {
 	sw     *ethswitch.LearningSwitch
 	tapMAC net.HardwareAddr
 	ln     net.Listener
-	logger  *log.Logger
-	mgmtLn  net.Listener // 本机管理套接字（clients/status 查询）
+	logger *log.Logger
+	mgmtLn net.Listener // 本机管理套接字（clients/status 查询）
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -117,17 +117,22 @@ type Server struct {
 }
 
 type session struct {
-	id      uint64
-	conn    net.Conn
-	peer    string
-	lease   *addr.Lease
-	macKey  string
-	name    string
-	writeMu sync.Mutex
-	outQ    chan []byte // 有界发送队列：慢消费者只丢自己的帧，不阻塞交换机
-	done    chan struct{}
-	dropped atomic.Uint64
-	crypto     *crypto.SecureConn   // 加密通道（PSK 握手后非 nil）
+	id     uint64
+	conn   net.Conn
+	peer   string
+	lease  *addr.Lease
+	macKey string
+	name   string
+	// P2P 状态（管理面展示用）
+	p2pCandidate string // STUN 映射候选（"" 表示未上报）
+	p2pReady     bool   // 客户端通知打洞成功
+	p2pPeerMAC   string // 打通的对端虚拟 MAC
+	p2pMu        sync.RWMutex
+	writeMu      sync.Mutex
+	outQ         chan []byte // 有界发送队列：慢消费者只丢自己的帧，不阻塞交换机
+	done         chan struct{}
+	dropped      atomic.Uint64
+	crypto       *crypto.SecureConn // 加密通道（PSK 握手后非 nil）
 }
 
 func (s *session) send(typ byte, body []byte) error {
@@ -342,11 +347,26 @@ func (s *Server) managementState() proto.ManagementState {
 	list := make([]proto.ClientInfo, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		lease := sess.lease
+		sess.p2pMu.RLock()
+		cand, ready, peerMAC := sess.p2pCandidate, sess.p2pReady, sess.p2pPeerMAC
+		sess.p2pMu.RUnlock()
+		var p2p string
+		switch {
+		case !s.cfg.P2P:
+			p2p = "off"
+		case ready:
+			p2p = "p2p-ok -> " + peerMAC
+		case cand != "":
+			p2p = "stun-ok " + cand + "（打洞中）"
+		default:
+			p2p = "relay"
+		}
 		list = append(list, proto.ClientInfo{
 			IP:   lease.IP.String(),
 			MAC:  lease.MAC.String(),
 			Peer: sess.peer,
 			Name: sess.name,
+			P2P:  p2p,
 		})
 	}
 	s.mu.RUnlock()
@@ -452,11 +472,26 @@ func (s *Server) getManagementClientInfo() []proto.ClientInfo {
 	list := make([]proto.ClientInfo, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		lease := sess.lease
+		sess.p2pMu.RLock()
+		cand, ready, peerMAC := sess.p2pCandidate, sess.p2pReady, sess.p2pPeerMAC
+		sess.p2pMu.RUnlock()
+		var p2p string
+		switch {
+		case !s.cfg.P2P:
+			p2p = "off"
+		case ready:
+			p2p = "p2p-ok -> " + peerMAC
+		case cand != "":
+			p2p = "stun-ok " + cand + "（打洞中）"
+		default:
+			p2p = "relay"
+		}
 		list = append(list, proto.ClientInfo{
 			IP:   lease.IP.String(),
 			MAC:  lease.MAC.String(),
 			Peer: sess.peer,
 			Name: sess.name,
+			P2P:  p2p,
 		})
 	}
 	return list
@@ -508,8 +543,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	sess := &session{
 		id: lease.ClientID, conn: conn, peer: peer,
 		lease: lease, macKey: macKey,
-		outQ: make(chan []byte, 512),
-		done: make(chan struct{}),
+		outQ:   make(chan []byte, 512),
+		done:   make(chan struct{}),
 		crypto: sec,
 	}
 	var writerWG sync.WaitGroup
@@ -622,6 +657,21 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.registerPeer(sess, sess.lease.MAC.String(), adv.Candidate)
 			// 找到对端并下发其候选
 			s.distributeCandidates(sess, adv.MAC)
+		case proto.TypeP2PReady:
+			// 客户端通知打洞成功（管理面展示用，不影响数据面）
+			if !s.cfg.P2P {
+				break
+			}
+			var ready proto.P2PReady
+			if json.Unmarshal(msg.Body, &ready) != nil {
+				break
+			}
+			sess.p2pMu.Lock()
+			sess.p2pReady = true
+			sess.p2pPeerMAC = ready.PeerMAC
+			sess.p2pMu.Unlock()
+			s.logger.Printf("vrndis server: peer %s P2P 打洞成功 -> %s",
+				sess.lease.MAC.String(), ready.PeerMAC)
 		case proto.TypeBye:
 			return
 		default:
@@ -651,6 +701,9 @@ func (s *Server) registerPeer(sess *session, mac, candidate string) {
 		candidate: candidate,
 		conn:      sess.conn,
 	}
+	sess.p2pMu.Lock()
+	sess.p2pCandidate = candidate
+	sess.p2pMu.Unlock()
 	s.logger.Printf("vrndis server: 候选注册 %s -> %s", mac, candidate)
 }
 

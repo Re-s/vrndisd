@@ -316,7 +316,7 @@ func cmdService(args []string) error {
 				cfg.STUNListen = *stunListen
 			case "p2p":
 				cfg.P2P = *p2p
-						case "server":
+			case "server":
 				cfg.Server = *serverAddr
 			case "name":
 				cfg.Name = *name
@@ -463,7 +463,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 				MTU:     cfg.MTU,
 				P2P:     cfg.P2P,
 				PSK:     []byte(cfg.PSK),
-				})
+			})
 			if err != nil {
 				return err
 			}
@@ -634,7 +634,7 @@ func cmdClients(args []string) error {
 		fmt.Println("  （无在线客户端）")
 	}
 	for i, c := range state.Clients {
-		fmt.Printf("  %d. %s (%s/%s) -> %s\n", i+1, c.IP, c.Name, c.MAC, c.Peer)
+		fmt.Printf("  %d. %s (%s/%s) -> %s [p2p: %s]\n", i+1, c.IP, c.Name, c.MAC, c.Peer, c.P2P)
 	}
 	return nil
 }
