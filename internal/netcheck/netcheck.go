@@ -56,7 +56,7 @@ func Run(ctx context.Context, primary, secondary, extra string) (*Result, error)
 	if primary == "" {
 		return nil, errors.New("vrndis/netcheck: primary STUN address is required")
 	}
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, fmt.Errorf("vrndis/netcheck: listen: %w", err)
 	}

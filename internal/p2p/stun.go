@@ -38,11 +38,15 @@ func Discover(ctx context.Context, stunServer string, localPort int) (*net.UDPCo
 	if err != nil {
 		return nil, nil, fmt.Errorf("vrndis/p2p: resolve stun %q: %w", stunServer, err)
 	}
-	local, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", localPort))
-	if err != nil {
-		return nil, nil, err
+	// localPort == 0 表示随机端口。绑定 IPv4 通配地址并强制 v4 socket：
+	// Go 的 ListenUDP("udp", ...) 即使给 IPv4zero 也会建 dual-stack
+	// AF_INET6 socket（LocalAddr 显示 [::]），Windows 上偶发收不到
+	// v4-mapped 响应；探测/打洞均为 IPv4 场景，直接锁 udp4。
+	local := &net.UDPAddr{Port: localPort}
+	if saddr.IP.To4() != nil {
+		local.IP = net.IPv4zero
 	}
-	conn, err := net.ListenUDP("udp", local)
+	conn, err := net.ListenUDP("udp4", local)
 	if err != nil {
 		return nil, nil, fmt.Errorf("vrndis/p2p: listen: %w", err)
 	}

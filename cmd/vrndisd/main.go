@@ -232,7 +232,7 @@ func discoProbe(timeout time.Duration, cand string) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return 0, err
 	}

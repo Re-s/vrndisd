@@ -52,7 +52,7 @@ type Tunnel struct {
 // 返回已建立的 Tunnel。若在 ctx 截止前未打通，返回 ErrPunchTimeout。
 func Punch(ctx context.Context, localPort int, peerCandidates []*net.UDPAddr) (*Tunnel, error) {
 	local := &net.UDPAddr{IP: net.IPv4zero, Port: localPort}
-	conn, err := net.ListenUDP("udp", local)
+	conn, err := net.ListenUDP("udp4", local)
 	if err != nil {
 		return nil, fmt.Errorf("vrndis/p2p: listen punch: %w", err)
 	}
