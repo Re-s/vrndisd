@@ -393,10 +393,10 @@ func (s *Server) manageLoop() {
 		return
 	}
 	s.mgmtLn = ln
-	defer func() {
-		ln.Close()
-		os.Remove(path)
-	}()
+	// 不在退出时删除 socket 文件：systemd restart 场景下旧进程的退出
+	// 清理可能晚于新进程的 Remove+Listen，从而误删新进程刚建好的文件
+	// （表现为管理套接字"消失"）。残留文件由下次启动时的 Remove 清理。
+	defer ln.Close()
 	s.logger.Printf("vrndis server: 管理套接字 %s", path)
 
 	for {
