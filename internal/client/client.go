@@ -331,10 +331,12 @@ type peerInfo struct {
 	Addr *net.UDPAddr
 }
 
-// waitForPeerCandidate 阻塞等待服务器下发 TypePeerCandidate 消息。
+// waitForPeerCandidate 阻塞等待服务器下发 TypePeerCandidate 消息，并在
+// 收到首个候选后的短窗口内继续收集（服务器会下发/推送多个 peer 的候选，
+// 客户端上线时序错开时，对端真实候选可能稍晚到达）。
 // 由 sockToDev 在收到消息后通过 peerCandCh 投递，避免两个 goroutine 竞争读
 // 同一个连接导致消息丢失。
-func (c *Client) waitForPeerCandidate(ctx context.Context) (*peerInfo, error) {
+func (c *Client) waitForPeerCandidate(ctx context.Context) ([]*peerInfo, error) {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
@@ -342,13 +344,37 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) (*peerInfo, error) {
 		return nil, errors.New("vrndis/client: 无活跃连接，无法等待 peer 候选")
 	}
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.stopCh:
-		return nil, errors.New("vrndis/client: 客户端已停止")
-	case pi := <-c.peerCandCh:
-		return pi, nil
+	var out []*peerInfo
+	for {
+		var timer <-chan time.Time
+		if len(out) > 0 {
+			// 已有候选：再给 300ms 收集后续候选（同 MAC 去重）
+			t := time.NewTimer(300 * time.Millisecond)
+			defer t.Stop()
+			timer = t.C
+		}
+		select {
+		case <-ctx.Done():
+			if len(out) > 0 {
+				return out, nil
+			}
+			return nil, ctx.Err()
+		case <-c.stopCh:
+			return nil, errors.New("vrndis/client: 客户端已停止")
+		case pi := <-c.peerCandCh:
+			dup := false
+			for _, e := range out {
+				if bytes.Equal(e.MAC, pi.MAC) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				out = append(out, pi)
+			}
+		case <-timer:
+			return out, nil
+		}
 	}
 }
 
@@ -425,9 +451,20 @@ func (c *Client) p2pConnect() {
 		return
 	}
 
-	// 1) 通过 STUN 获取本机 NAT 映射后的公网地址
+	// 1) 通过 STUN 获取本机 NAT 映射后的公网地址。
+	// ctx 联动 stopCh：Stop 时立即取消 STUN/候选等待/打洞，避免
+	// 客户端关闭后 punch 窗口空转 30 秒才退出。
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	cancelOnStop := make(chan struct{})
+	defer close(cancelOnStop)
+	go func() {
+		select {
+		case <-c.stopCh:
+			cancel()
+		case <-cancelOnStop:
+		}
+	}()
 	stunConn, localAddr, err := p2p.Discover(ctx, stun, 0)
 	if err != nil {
 		c.logger.Printf("vrndis client: STUN Discover 失败: %v（回退 TCP 中继）", err)
@@ -456,29 +493,55 @@ func (c *Client) p2pConnect() {
 	// 3) 等待对端候选（带超时），超时则回退
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
-	peer, err := c.waitForPeerCandidate(ctx2)
+	go func() {
+		select {
+		case <-c.stopCh:
+			cancel2()
+		case <-cancelOnStop:
+		}
+	}()
+	peers, err := c.waitForPeerCandidate(ctx2)
 	if err != nil {
 		c.logger.Printf("vrndis client: 等待对端候选超时: %v（回退 TCP 中继）", err)
 		return
 	}
-	c.logger.Printf("vrndis client: 收到对端 %s 候选 %v", peer.MAC, peer.Addr.String())
+	for _, p := range peers {
+		c.logger.Printf("vrndis client: 收到对端 %s 候选 %v", p.MAC, p.Addr.String())
+	}
 
 	// 4) 打洞
 	c.p2pMu.Lock()
 	c.peering = true
 	c.p2pMu.Unlock()
-	tun, err := p2p.PunchConn(ctx2, stunConn, []*net.UDPAddr{peer.Addr})
+	var cands []*net.UDPAddr
+	for _, p := range peers {
+		cands = append(cands, p.Addr)
+	}
+	tun, err := p2p.PunchConn(ctx2, stunConn, cands)
 	if err != nil {
 		c.clearTunnel()
 		c.logger.Printf("vrndis client: P2P 打洞失败: %v（回退 TCP 中继）", err)
 		return
 	}
-	c.setTunnel(tun, peer.MAC)
+	// 从实际打通的来源回查对端 MAC（候选回退匹配：NAT 后 from 即候选映射地址）
+	var peerMAC net.HardwareAddr
+	if tun.Peer() != nil {
+		for _, p := range peers {
+			if p.Addr.String() == tun.Peer().String() {
+				peerMAC = p.MAC
+				break
+			}
+		}
+	}
+	if peerMAC == nil && len(peers) > 0 {
+		peerMAC = peers[0].MAC
+	}
+	c.setTunnel(tun, peerMAC)
 	// 通知服务器打洞成功（仅管理面展示用，失败无碍）
-	if conn := c.currentConn(); conn != nil {
+	if conn := c.currentConn(); conn != nil && peerMAC != nil {
 		body, _ := json.Marshal(proto.P2PReady{
 			Version: proto.ProtocolVersion,
-			PeerMAC: peer.MAC.String(),
+			PeerMAC: peerMAC.String(),
 		})
 		_ = c.send(conn, proto.TypeP2PReady, body)
 	}
@@ -593,9 +656,10 @@ func (c *Client) Stop() {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
-	if c.tunnel != nil {
-		c.clearTunnel()
-		// 隧道写入失败已在上游处理回退；这里仅关闭本地隧道资源。
+	// 显式关闭隧道：keepalive 会让 tunnel 永不空闲（idle monitor 不会触发），
+	// 不 Close 的话 p2pConnect 会一直卡在 <-tun.Done()，Stop 无法返回。
+	if t := c.clearTunnel(); t != nil {
+		_ = t.Close()
 	}
 	if conn != nil {
 		// 尽力而为发 BYE（带写超时，避免慢对端卡住退出）。

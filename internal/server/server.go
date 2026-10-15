@@ -82,8 +82,8 @@ type peerInfo struct {
 	mac       string // 虚拟 MAC（同时也是 peers 表键）
 	ip        net.IP
 	name      string
-	candidate string // "host:port"，该 peer 上报的 NAT 映射地址
-	conn      net.Conn
+	candidate string   // "host:port"，该 peer 上报的 NAT 映射地址
+	sess      *session // 推送候选用（复用带锁的 send）
 }
 
 // Server 虚拟 RNDIS 服务器。
@@ -700,18 +700,48 @@ func (s *Server) unregisterPeer(mac string) {
 
 func (s *Server) registerPeer(sess *session, mac, candidate string) {
 	s.peersMu.Lock()
-	defer s.peersMu.Unlock()
 	s.peers[mac] = &peerInfo{
 		mac:       mac,
 		ip:        sess.lease.IP,
 		name:      sess.name,
 		candidate: candidate,
-		conn:      sess.conn,
+		sess:      sess,
 	}
 	sess.p2pMu.Lock()
 	sess.p2pCandidate = candidate
 	sess.p2pMu.Unlock()
+	s.peersMu.Unlock()
 	s.logger.Printf("vrndis server: 候选注册 %s -> %s", mac, candidate)
+	// 向其它已上报候选的在线 peer 推送本端新候选。
+	// 客户端两端上线时序错开时，只有此处推送才能让对端在打洞窗口内
+	// 拿到本端候选（distributeCandidates 只在新 session 上线时下发）。
+	s.pushCandidateToOthers(sess, mac, candidate)
+}
+
+// pushCandidateToOthers 把新注册的候选推送给其它已在线且已上报候选的 peer。
+func (s *Server) pushCandidateToOthers(sess *session, selfMAC, candidate string) {
+	s.peersMu.RLock()
+	self := s.peers[selfMAC]
+	others := make([]*peerInfo, 0, len(s.peers))
+	for _, p := range s.peers {
+		if p.mac != selfMAC && p.candidate != "" && p.sess != nil {
+			others = append(others, p)
+		}
+	}
+	s.peersMu.RUnlock()
+	if self == nil {
+		return
+	}
+	for _, p := range others {
+		_ = p.sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
+			Version:   proto.ProtocolVersion,
+			PeerMAC:   selfMAC,
+			PeerIP:    self.ip.String(),
+			PeerName:  self.name,
+			Candidate: candidate,
+		}))
+		s.logger.Printf("vrndis server: 向 %s 推送新候选 %s -> %s", p.mac, selfMAC, candidate)
+	}
 }
 
 // distributeCandidates 向当前 session 的对端下发 peer 候选。

@@ -94,6 +94,9 @@ func Discover(ctx context.Context, stunServer string, localPort int) (*net.UDPCo
 		if !ok {
 			return nil, nil, errors.New("vrndis/p2p: stun response missing XOR-MAPPED-ADDRESS")
 		}
+		// 清除读写截止：conn 交由打洞/隧道复用，残留的 write deadline
+		// 会在后续 Tunnel 数据写时立即报 i/o timeout。
+		_ = conn.SetDeadline(time.Time{})
 		addr, err := decodeXORMapped(raw)
 		if err != nil {
 			conn.Close()
