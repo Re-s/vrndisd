@@ -40,8 +40,8 @@ func TestSTUNServerStartStop(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 验证服务器端口已绑定
-	if srv.udpConn == nil {
-		t.Fatal("udpConn is nil")
+	if srv.Addr() == nil {
+		t.Fatal("not bound")
 	}
 }
 
@@ -91,10 +91,10 @@ func TestSTUNServerStartReturnsAfterStop(t *testing.T) {
 	go func() { done <- srv.Start() }()
 
 	deadline := time.Now().Add(1 * time.Second)
-	for srv.udpConn == nil && time.Now().Before(deadline) {
+	for srv.Addr() == nil && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if srv.udpConn == nil {
+	if srv.Addr() == nil {
 		t.Fatal("server did not bind")
 	}
 

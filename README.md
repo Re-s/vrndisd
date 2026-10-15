@@ -106,6 +106,34 @@ JSON 格式可手工编辑后 `service stop && service start` 生效。
 # srv.SendCommandToClient("01:02:03:04:05:06", cmd)
 ```
 
+### P2P 诊断（netcheck / ping / peers）
+
+仿 Tailscale 的三件套，在任何客户端机器上即可自测 P2P 能力：
+
+```bash
+# 1) netcheck：本机 NAT 环境与 UDP 可达性探测
+vrndisd netcheck --server 203.0.113.1 --extra-stun stun.l.google.com:19302
+# 输出各 STUN 返回的映射地址、MappingVariesByDest（是否 symmetric NAT）、
+# NAT 类型与打洞预期。主/第二 STUN 指向服务器自建 :5478 / :5479，
+# --extra-stun 可选第三方 STUN 作交叉比对。
+
+# 2) ping：到指定 peer 的路径探测（relay vs p2p + RTT）
+vrndisd ping 10.77.0.4 --server 203.0.113.1:7777 --psk yourpsk --count 5
+# 若本地到该 peer 的直连路径可通，输出 pong from 10.77.0.4 via p2p(1.2.3.4:5678) in 8ms；
+# 否则输出 via relay 的中继基准 RTT。
+
+# 3) peers：全部在线 peer 的路径一览
+vrndisd peers --server 203.0.113.1:7777 --psk yourpsk
+# 10.77.0.2 (host)   via p2p(...)  8ms
+# 10.77.0.5 (phone)  via relay     42ms
+```
+
+实现要点：`internal/netcheck` 用同一 UDP socket 串行向多个 STUN 发 Binding
+Request 并比对映射端口/IP，判定 cone / symmetric / blocked；`internal/ctrl`
+是到服务器的轻量控制信道（复用 Hello/Assign 握手，不建网卡不进数据面），
+ping/peers 经 PeerQuery 拿对端候选后，用 p2p 的 disco 探测帧（probe magic）
+直接向候选地址测直连 RTT——对端 `Tunnel.Read` 收到任意来源的 probe 会原路回包。
+
 ### STUN 服务器（P2P 连接支持）
 
 ```bash

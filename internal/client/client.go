@@ -353,18 +353,17 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) (*peerInfo, error) {
 }
 
 // candidateAddr 返回 P2P 打洞的目标地址。
-// 优先使用显式配置的 --stun-server；否则使用服务器监听地址（对称打洞策略：
-// 两侧均向服务器监听端口发包，NAT 复用映射后直连）。
+// 优先使用显式配置的 --stun-server；否则默认走服务器的公网地址 + 5478：
+// STUN 请求必须经物理网络直接送达，服务器（NAT 外侧）才能看到客户端
+// 真实映射；若经隧道中继，看到的源地址只是隧道内网地址，候选无效。
 func (c *Client) candidateAddr() string {
 	if c.cfg.STUNServer != "" {
 		return c.cfg.STUNServer
 	}
-	c.assignMu.RLock()
-	defer c.assignMu.RUnlock()
-	if c.assign == nil {
-		return ""
+	if host, _, err := net.SplitHostPort(c.cfg.Server); err == nil {
+		return net.JoinHostPort(host, "5478")
 	}
-	return c.assign.ServerIP + ":5478"
+	return ""
 }
 
 // currentConn 获取当前活跃连接（并发安全）。

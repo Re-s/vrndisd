@@ -57,13 +57,13 @@ func TestBindingRoundTrip(t *testing.T) {
 	defer srv.Stop()
 
 	deadline := time.Now().Add(1 * time.Second)
-	for srv.udpConn == nil && time.Now().Before(deadline) {
+	for srv.Addr() == nil && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if srv.udpConn == nil {
+	if srv.Addr() == nil {
 		t.Fatal("server did not bind")
 	}
-	addr := srv.udpConn.LocalAddr().String()
+	addr := srv.Addr().String()
 
 	c, err := net.Dial("udp", addr)
 	if err != nil {

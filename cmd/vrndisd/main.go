@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -25,10 +26,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"vrndis/internal/client"
+	"vrndis/internal/ctrl"
+	"vrndis/internal/netcheck"
 	"vrndis/internal/proto"
 	"vrndis/internal/server"
 	"vrndis/internal/service"
@@ -59,6 +63,12 @@ func run(argv []string) int {
 		err = cmdService(args[1:])
 	case "stun-server", "stun":
 		err = cmdStunServer(args[1:])
+	case "netcheck":
+		err = cmdNetcheck(args[1:])
+	case "ping":
+		err = cmdPing(args[1:])
+	case "peers":
+		err = cmdPeers(args[1:])
 	case "status":
 		err = cmdStatus(args[1:])
 	case "clients":
@@ -89,6 +99,9 @@ func usage() {
   service        持久化服务管理：install|uninstall|start|stop|status|export
   service-run    服务入口（由 systemd/SCM 调用，也可前台运行）
   stun-server    内置 STUN 服务器（RFC 3489/5389 Binding，供 NAT 穿透）
+  netcheck       探测本机 NAT 环境与 UDP 可达性（P2P 打洞能力评估）
+  ping           探测到指定 peer 的路径（relay/p2p + RTT，tailscale 风格）
+  peers          列出全部在线 peer 及各自路径状态
   status         服务器运行状态与在线客户端概况
   clients        列出当前在线客户端（名称/IP/MAC/对端）
   version        显示版本号
@@ -99,6 +112,14 @@ func usage() {
   sudo vrndisd server --listen 0.0.0.0:7777 --stun --stun-listen 0.0.0.0:5478
   sudo vrndisd stun-server --listen 0.0.0.0:5478
   vrndisd stun-server --version
+
+示例（netcheck）：
+  vrndisd netcheck --server 1.2.3.4                      # 服务器双端口探测
+  vrndisd netcheck --server 1.2.3.4 --extra-stun stun.l.google.com:19302
+
+示例（ping / peers）：
+  vrndisd ping 10.77.0.4 --server 1.2.3.4:7777 --psk yourpsk
+  vrndisd peers --server 1.2.3.4:7777 --psk yourpsk
 
 示例：
   sudo vrndisd server --listen 0.0.0.0:7777
@@ -113,6 +134,291 @@ func usage() {
 `, Version)
 }
 
+// ---------- netcheck ----------
+
+// cmdNetcheck 探测本机 NAT 环境与 UDP 可达性：同一 UDP socket 向主/第二
+// STUN（及可选第三方 STUN）发送 Binding Request，比对各目的地映射。
+func cmdNetcheck(args []string) error {
+	fs := flag.NewFlagSet("netcheck", flag.ExitOnError)
+	server := fs.String("server", "", "服务器地址 host[:port]（默认端口 5478）")
+	extra := fs.String("extra-stun", "", "可选第三方 STUN host[:port]（跨公网 IP 映射比对）")
+	fs.Parse(args)
+	if *server == "" {
+		return errors.New("--server 必填（服务器 STUN 主地址）")
+	}
+	host, port, err := net.SplitHostPort(*server)
+	if err != nil {
+		host, port = *server, "5478"
+	}
+	if port == "" {
+		port = "5478"
+	}
+	primary := net.JoinHostPort(host, port)
+	secondary := net.JoinHostPort(host, "5479")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fmt.Printf("netcheck：探测 %s / %s", primary, secondary)
+	if *extra != "" {
+		fmt.Printf(" / %s", *extra)
+	}
+	fmt.Println(" ...")
+	res, err := netcheck.Run(ctx, primary, secondary, *extra)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Report:")
+	fmt.Printf("  UDP:                    %v\n", res.UDPOK)
+	if res.Primary != nil {
+		fmt.Printf("  映射(主 STUN):           %s (RTT %v)\n", res.Primary, fmtDur(res.PrimaryRTT))
+	}
+	if res.Secondary != nil {
+		fmt.Printf("  映射(第二 STUN):         %s (RTT %v)\n", res.Secondary, fmtDur(res.SecondaryRTT))
+	}
+	if res.Extra != nil {
+		fmt.Printf("  映射(第三方 STUN):       %s (RTT %v)\n", res.Extra, fmtDur(res.ExtraRTT))
+	}
+	fmt.Printf("  MappingVariesByDest:    %v\n", res.MappingVariesByDest)
+	fmt.Printf("  NAT 类型:               %s\n", res.NATType)
+	fmt.Printf("  打洞预期:               %s\n", res.HolepunchProspect)
+	return nil
+}
+
+// parseLoose 宽松解析：允许位置参数出现在 flags 之前（如
+// `vrndisd ping 10.77.0.4 --server x`）。逐条消费 flags，返回位置参数。
+func parseLoose(fs *flag.FlagSet, args []string) []string {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(a) > 1 && a[0] == '-' {
+			if strings.Contains(a, "=") {
+				_ = fs.Parse([]string{a})
+				continue
+			}
+			fl := fs.Lookup(strings.TrimLeft(a, "-"))
+			if bf, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+				_ = fs.Parse([]string{a})
+				continue
+			}
+			if i+1 < len(args) {
+				_ = fs.Parse([]string{a, args[i+1]})
+				i++
+				continue
+			}
+		}
+		positional = append(positional, a)
+	}
+	return positional
+}
+
+// fmtDur tailscale 风格的 RTT 格式化：<1ms 显示 µs。
+func fmtDur(d time.Duration) string {
+	if d < time.Millisecond {
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	}
+	return fmt.Sprintf("%.1fms", float64(d.Seconds())*1e3)
+}
+
+// ---------- ping / peers ----------
+
+// discoProbe 向候选地址发送 disco 探测包并等待对端 tunnel 原路回包。
+// 返回直连 RTT；超时/错误时返回非 nil error。
+func discoProbe(timeout time.Duration, cand string) (time.Duration, error) {
+	raddr, err := net.ResolveUDPAddr("udp", cand)
+	if err != nil {
+		return 0, err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	start := time.Now()
+	if _, err := conn.WriteToUDP(probeMagicBytes(), raddr); err != nil {
+		return 0, err
+	}
+	_ = conn.SetReadDeadline(start.Add(timeout))
+	buf := make([]byte, 64)
+	for {
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return 0, err
+		}
+		if n == len(probeMagicBytes()) && string(buf[:n]) == string(probeMagicBytes()) {
+			_ = from
+			return time.Since(start), nil
+		}
+	}
+}
+
+func probeMagicBytes() []byte {
+	return []byte("vrndis-p2p-probe\x00\x01")
+}
+
+// cmdPing tailscale 风格的 peer 路径探测：控制信道连接服务器，
+// PeerQuery 拿目标候选 → disco 探测直连路径；无响应则报中继基准。
+func cmdPing(args []string) error {
+	fs := flag.NewFlagSet("ping", flag.ExitOnError)
+	server := fs.String("server", "", "服务器地址 host:port")
+	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
+	count := fs.Int("count", 5, "探测次数")
+	wait := fs.Duration("wait", 3*time.Second, "每次探测等待超时")
+	name := fs.String("name", "ping", "客户端名称")
+	positional := parseLoose(fs, args)
+	target := ""
+	if len(positional) > 0 {
+		target = positional[0]
+	}
+	if *server == "" {
+		return errors.New("--server 必填")
+	}
+	if target == "" {
+		return errors.New("用法: vrndisd ping <隧道IP或MAC> --server host:port")
+	}
+
+	var pskBytes []byte
+	if *psk != "" {
+		pskBytes = []byte(*psk)
+	}
+	sess, _, err := ctrl.Dial(*server, *name, pskBytes, 8*time.Second)
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+
+	// 查目标候选
+	body, _ := json.Marshal(proto.PeerQuery{Version: proto.ProtocolVersion, Target: target})
+	if err := sess.Send(proto.TypePeerQuery, body); err != nil {
+		return err
+	}
+	candMsg, err := sess.RecvDeadline(time.Now().Add(5 * time.Second))
+	if err != nil {
+		return fmt.Errorf("读取 PeerQuery 应答超时: %w", err)
+	}
+	if candMsg.Type != proto.TypePeerCandidate {
+		return fmt.Errorf("期望 PeerCandidate，收到 %s", proto.TypeName(candMsg.Type))
+	}
+	var cand proto.PeerCandidate
+	if err := json.Unmarshal(candMsg.Body, &cand); err != nil {
+		return err
+	}
+	if cand.Candidate == "" {
+		fmt.Printf("peer %s：不存在或未上报候选（未开 -p2p / 打洞未活跃）\n", target)
+		return nil
+	}
+	label := target
+	if cand.PeerName != "" {
+		label = fmt.Sprintf("%s (%s)", target, cand.PeerName)
+	}
+
+	// relay 基准 RTT
+	var relayRTT time.Duration
+	if r, err := sess.PingRTT(3 * time.Second); err == nil {
+		relayRTT = r
+	}
+
+	for i := 0; i < *count; i++ {
+		if rtt, err := discoProbe(*wait, cand.Candidate); err == nil {
+			fmt.Printf("pong from %s via p2p(%s) in %s\n", label, cand.Candidate, fmtDur(rtt))
+			continue
+		}
+		if relayRTT > 0 {
+			fmt.Printf("pong from %s via relay in %s（直连无响应，走服务器中继）\n", label, fmtDur(relayRTT))
+		} else {
+			fmt.Printf("pong from %s: 无响应\n", target)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
+}
+
+// cmdPeers 列出全部在线 peer 并并发 disco 探测路径状态。
+func cmdPeers(args []string) error {
+	fs := flag.NewFlagSet("peers", flag.ExitOnError)
+	server := fs.String("server", "", "服务器地址 host:port")
+	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
+	wait := fs.Duration("wait", 3*time.Second, "每个 peer 探测超时")
+	name := fs.String("name", "peers", "客户端名称")
+	parseLoose(fs, args)
+	if *server == "" {
+		return errors.New("--server 必填")
+	}
+
+	var pskBytes []byte
+	if *psk != "" {
+		pskBytes = []byte(*psk)
+	}
+	sess, _, err := ctrl.Dial(*server, *name, pskBytes, 8*time.Second)
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+
+	body, _ := json.Marshal(proto.PeerQuery{Version: proto.ProtocolVersion})
+	if err := sess.Send(proto.TypePeerQuery, body); err != nil {
+		return err
+	}
+	// 收集应答直到超时
+	var cands []proto.PeerCandidate
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		msg, err := sess.RecvDeadline(time.Now().Add(500 * time.Millisecond))
+		if err != nil {
+			break
+		}
+		if msg.Type != proto.TypePeerCandidate {
+			continue
+		}
+		var c proto.PeerCandidate
+		if err := json.Unmarshal(msg.Body, &c); err != nil {
+			continue
+		}
+		if c.Candidate == "" {
+			break // 空应答：列表结束/无 peer
+		}
+		cands = append(cands, c)
+	}
+	if len(cands) == 0 {
+		fmt.Println("无在线 peer（或均未上报 P2P 候选）")
+		return nil
+	}
+
+	var relayRTT time.Duration
+	if r, err := sess.PingRTT(3 * time.Second); err == nil {
+		relayRTT = r
+	}
+
+	fmt.Printf("在线 peer (%d)：\n", len(cands))
+	var wg sync.WaitGroup
+	results := make([]string, len(cands))
+	for i, c := range cands {
+		wg.Add(1)
+		go func(i int, c proto.PeerCandidate) {
+			defer wg.Done()
+			label := c.PeerIP
+			if c.PeerName != "" {
+				label = fmt.Sprintf("%s (%s)", c.PeerIP, c.PeerName)
+			}
+			if rtt, err := discoProbe(*wait, c.Candidate); err == nil {
+				results[i] = fmt.Sprintf("  %-22s via p2p(%s)  %s", label, c.Candidate, fmtDur(rtt))
+			} else if relayRTT > 0 {
+				results[i] = fmt.Sprintf("  %-22s via relay  %s", label, fmtDur(relayRTT))
+			} else {
+				results[i] = fmt.Sprintf("  %-22s 无响应", label)
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	for _, r := range results {
+		fmt.Println(r)
+	}
+	return nil
+}
+
 // ---------- server ----------
 
 // startStunServer 可选地同进程启动内置 STUN 服务器（NAT 穿透）。
@@ -120,11 +426,11 @@ func usage() {
 //   - srv    服务器实例（供上层 Stop 优雅关停）
 //   - errCh  启动失败时送入错误，供上层整体优雅关停（端口占用等）
 //   - done   Start 返回后关闭，用于验证协程退出
-func startStunServer(stun bool, listen string) (*stunserver.Server, <-chan error, <-chan struct{}) {
+func startStunServer(stun bool, listen, extra string) (*stunserver.Server, <-chan error, <-chan struct{}) {
 	if !stun {
 		return nil, nil, nil
 	}
-	srv := stunserver.New(stunserver.Config{ListenAddr: listen})
+	srv := stunserver.New(stunserver.Config{ListenAddr: listen, ExtraAddr: extra})
 	errCh := make(chan error, 1)
 	done := make(chan struct{})
 	go func() {
@@ -150,6 +456,7 @@ func cmdServer(args []string) error {
 	p2p := fs.Bool("p2p", false, "开启 P2P 直连（客户端间 NAT 穿透走 UDP，失败回退服务器中继）")
 	stun := fs.Bool("stun", false, "同时启动内置 STUN 服务器（NAT 穿透）")
 	stunListen := fs.String("stun-listen", ":5478", "STUN 监听地址（--stun 时生效）")
+	stunListenExtra := fs.String("stun-listen-extra", ":5479", "STUN 第二监听地址（netcheck 跨目的地映射比对，检测 symmetric NAT）")
 	psk := fs.String("psk", "", "预共享密钥（非空时要求客户端加密握手）")
 	mgmtSock := fs.String("management-socket", "", "本机管理套接字路径（默认 /run/vrndisd/management.sock，- 禁用）")
 	fs.Parse(args)
@@ -171,7 +478,7 @@ func cmdServer(args []string) error {
 	log.Println("vrndisd: RNDIS 服务器已启动")
 
 	cfg.P2P = *p2p
-	stunSrv, stunErr, _ := startStunServer(*stun, *stunListen)
+	stunSrv, stunErr, _ := startStunServer(*stun, *stunListen, *stunListenExtra)
 
 	// 等待退出信号；若 STUN 启动失败（如端口占用），也整体优雅关停。
 	sig := make(chan os.Signal, 1)
@@ -272,6 +579,7 @@ func cmdService(args []string) error {
 	mtu := fs.Int("mtu", 1500, "server: MTU")
 	stun := fs.Bool("stun", false, "server: 同时启动内置 STUN 服务器（NAT 穿透）")
 	stunListen := fs.String("stun-listen", ":5478", "server: STUN 监听地址（--stun 时生效）")
+	stunListenExtra := fs.String("stun-listen-extra", ":5479", "server: STUN 第二监听（netcheck 映射比对）")
 	p2p := fs.Bool("p2p", false, "开启 P2P 直连（客户端间 NAT 穿透走 UDP，失败回退服务器中继）")
 	serverAddr := fs.String("server", "", "client: 服务器地址 host:port")
 	name := fs.String("name", "", "client: 客户端名称（默认主机名）")
@@ -314,6 +622,7 @@ func cmdService(args []string) error {
 				cfg.STUN = *stun
 			case "stun-listen":
 				cfg.STUNListen = *stunListen
+				cfg.STUNListenExtra = *stunListenExtra
 			case "p2p":
 				cfg.P2P = *p2p
 			case "server":
@@ -420,6 +729,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 	p2p := fs.Bool("p2p", false, "覆盖配置: 开启 P2P 直连")
 	stun := fs.Bool("stun", false, "覆盖配置: 启动内置 STUN 服务器")
 	stunListen := fs.String("stun-listen", "", "覆盖配置: STUN 监听地址")
+	stunListenExtra := fs.String("stun-listen-extra", "", "覆盖配置: STUN 第二监听地址")
 	fs.Parse(args)
 	if globalCfg != "" {
 		*cfgPath = globalCfg
@@ -447,6 +757,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 			cfg.STUN = *stun
 		case "stun-listen":
 			cfg.STUNListen = *stunListen
+			cfg.STUNListenExtra = *stunListenExtra
 		}
 	})
 
@@ -473,7 +784,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 			log.Println("vrndisd: RNDIS 服务器已启动（服务模式）")
 
 			// STUN 未开启时返回 nil channel，select 永不命中，无 goroutine 泄漏。
-			stunSrv, stunErr, _ := startStunServer(cfg.STUN, cfg.STUNListen)
+			stunSrv, stunErr, _ := startStunServer(cfg.STUN, cfg.STUNListen, cfg.STUNListenExtra)
 			log.Println("vrndisd: 服务器已启动，等待退出信号...")
 			select {
 			case <-ctx.Done():

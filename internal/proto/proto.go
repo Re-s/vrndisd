@@ -27,6 +27,7 @@ const (
 	// 新增 P2P 消息类型
 	TypeP2PAdvertise  byte = 9  // 客户端 -> 服务器：上报本机候选（NAT 映射地址）
 	TypeP2PReady      byte = 13 // 客户端 -> 服务器：打洞成功，数据面已切 UDP 直连
+	TypePeerQuery     byte = 14 // 客户端 -> 服务器：查询 peer 候选（ping/status 用）
 	TypePeerCandidate byte = 10 // 服务器 -> 客户端：下发对端 MAC + 候选地址
 	// 加密握手消息类型（v3 协议，在 HELLO/ASSIGN 之前协商）
 	TypeCryptoHello byte = 11 // 客户端 -> 服务器：E_KC + 版本号
@@ -77,6 +78,8 @@ func TypeName(t byte) string {
 		return "P2P_ADV"
 	case TypeP2PReady:
 		return "P2P_READY"
+	case TypePeerQuery:
+		return "PEER_QUERY"
 	case TypePeerCandidate:
 		return "PEER_CAND"
 	case TypeCryptoHello:
@@ -180,6 +183,14 @@ func (ci ClientInfo) Serialize() []byte {
 	return data
 }
 
+// PeerQuery 查询 peer 候选地址（客户端 -> 服务器）。
+// Target 为对端 IP 或 MAC；空表示请求全部已知 peer。
+// 服务器以逐条 TypePeerCandidate 应答，无匹配时回一条空 Candidate。
+type PeerQuery struct {
+	Version int    `json:"version"`
+	Target  string `json:"target"`
+}
+
 // P2PReady 打洞成功通知（客户端 -> 服务器）。
 // 服务器据此在管理面（clients/status）展示该会话已切换 UDP 直连。
 type P2PReady struct {
@@ -198,5 +209,7 @@ type P2PAdvertise struct {
 type PeerCandidate struct {
 	Version   int    `json:"version"`
 	PeerMAC   string `json:"peer_mac"`  // 对端虚拟 MAC
+	PeerIP    string `json:"peer_ip"`   // 对端虚拟 IP（诊断展示用）
+	PeerName  string `json:"peer_name"` // 对端名称（诊断展示用）
 	Candidate string `json:"candidate"` // 对端 "host:port"
 }

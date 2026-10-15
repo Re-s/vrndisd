@@ -179,14 +179,19 @@ func (t *Tunnel) peerAddrOf() *net.UDPAddr {
 func (t *Tunnel) Read() ([]byte, error) {
 	for {
 		buf := make([]byte, maxUDPFrame)
-		n, _, err := t.conn.ReadFromUDP(buf)
+		n, from, err := t.conn.ReadFromUDP(buf)
 		t.touchRx()
 		if err != nil {
 			return nil, err
 		}
 		frame := buf[:n]
 		if isProbe(frame) {
-			continue // 吸收保活探测，不污染数据面
+			// disco 响应：对端打洞/保活探测原路回一个 probe，
+			// 供对方 ping 命令测直连 RTT；不污染数据面。
+			t.writeMu.Lock()
+			_, _ = t.conn.WriteToUDP(probeMagic, from)
+			t.writeMu.Unlock()
+			continue
 		}
 		return frame, nil
 	}

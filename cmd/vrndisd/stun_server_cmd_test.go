@@ -43,7 +43,7 @@ func TestServerStunFlagDefaults(t *testing.T) {
 
 // TestStartStunServerDisabled 验证 --stun 关闭时 startStunServer 返回 nil（不启动 STUN）。
 func TestStartStunServerDisabled(t *testing.T) {
-	srv, errCh, done := startStunServer(false, ":5478")
+	srv, errCh, done := startStunServer(false, ":5478", ":5479")
 	if srv != nil {
 		t.Errorf("stun=false 时 srv 应为 nil, got %v", srv)
 	}
@@ -58,7 +58,7 @@ func TestStartStunServerDisabled(t *testing.T) {
 // TestStartStunServerStartsAndStops 验证 --stun 开启时能启动 STUN 服务器并可优雅停止，
 // 证明 server --stun 双服务同进程场景下 STUN 能随整体关停退出。
 func TestStartStunServerStartsAndStops(t *testing.T) {
-	srv, errCh, done := startStunServer(true, "127.0.0.1:0")
+	srv, errCh, done := startStunServer(true, "127.0.0.1:0", "")
 	if srv == nil {
 		t.Fatal("stun=true 时 srv 不应为 nil")
 	}
@@ -114,7 +114,7 @@ func TestStartStunServerBindConflict(t *testing.T) {
 	addr := occ.Addr().String()
 	defer occ.Stop()
 
-	srv, errCh, done := startStunServer(true, addr)
+	srv, errCh, done := startStunServer(true, addr, "")
 	if srv == nil {
 		t.Fatal("srv 不应为 nil")
 	}

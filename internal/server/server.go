@@ -672,6 +672,13 @@ func (s *Server) handleConn(conn net.Conn) {
 			sess.p2pMu.Unlock()
 			s.logger.Printf("vrndis server: peer %s P2P 打洞成功 -> %s",
 				sess.lease.MAC.String(), ready.PeerMAC)
+		case proto.TypePeerQuery:
+			// 查询 peer 候选（ping/status 命令用）；P2P 关闭时无意义
+			var q proto.PeerQuery
+			if json.Unmarshal(msg.Body, &q) != nil {
+				break
+			}
+			s.answerPeerQuery(sess, q.Target)
 		case proto.TypeBye:
 			return
 		default:
@@ -726,6 +733,37 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 			Candidate: p.candidate,
 		}))
 		s.logger.Printf("vrndis server: 向 %s 下发对端 %s 候选 %s", selfMAC, p.mac, p.candidate)
+	}
+}
+
+// answerPeerQuery 应答 PeerQuery：按 target（IP/MAC，空=全部）在 peers
+// 表中查找已上报候选的 peer 并逐条回发；无匹配时回一条空 Candidate 便于客户端收尾。
+func (s *Server) answerPeerQuery(sess *session, target string) {
+	s.peersMu.RLock()
+	var matched []*peerInfo
+	for _, p := range s.peers {
+		if p.candidate == "" {
+			continue // 未上报候选（未开 P2P / 打洞未成功）不应答
+		}
+		if target == "" || p.ip.String() == target || p.mac == target || p.name == target {
+			matched = append(matched, p)
+		}
+	}
+	s.peersMu.RUnlock()
+	if len(matched) == 0 {
+		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
+			Version: proto.ProtocolVersion,
+		}))
+		return
+	}
+	for _, p := range matched {
+		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
+			Version:   proto.ProtocolVersion,
+			PeerMAC:   p.mac,
+			PeerIP:    p.ip.String(),
+			PeerName:  p.name,
+			Candidate: p.candidate,
+		}))
 	}
 }
 

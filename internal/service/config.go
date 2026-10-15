@@ -61,9 +61,10 @@ type Config struct {
 	DefaultRoute bool     `json:"default_route,omitempty"`
 
 	// 服务器侧：P2P 与内置 STUN。
-	P2P        bool   `json:"p2p,omitempty"`
-	STUN       bool   `json:"stun,omitempty"`
-	STUNListen string `json:"stun_listen,omitempty"`
+	P2P             bool   `json:"p2p,omitempty"`
+	STUN            bool   `json:"stun,omitempty"`
+	STUNListen      string `json:"stun_listen,omitempty"`
+	STUNListenExtra string `json:"stun_listen_extra,omitempty"`
 
 	// 加密
 	PSK string `json:"psk,omitempty"`
