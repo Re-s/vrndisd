@@ -166,3 +166,28 @@ tcpdump 抓不到任何客户端帧。
 11000 命中，隧道流量回到 main 表。失败仅记 stderr 不阻断（无该机制的
 ROM 不受影响）；Close() 尝试删除（残留亦安全：表内无路由时 fall through
 回到物理路径）。Cross-build 目标加入 `build.sh android`（arm64）。
+
+## 2026-10-15 补充：P2P 诊断三件套（netcheck / ping / peers）与管理套接字竞态
+
+**背景**：客户端 P2P 是否可用此前只能靠服务端日志推断。仿 Tailscale 实现三件套：
+
+- `vrndisd netcheck --server <公网> [--extra-stun host:port]`：同一 UDP socket
+  串行向主/第二/第三方 STUN 发 Binding Request，比对各目的地返回的映射地址——
+  端口随目的地变化 → symmetric NAT（MappingVariesByDest，打洞困难）；一致 →
+  cone 家族；全无应答 → udp-blocked。`internal/netcheck` 有 L3 单测。
+- `vrndisd ping <隧道IP/MAC/name> --server host:port [--psk] [--count N]`：
+  经 `internal/ctrl` 轻量控制信道（复用 Hello/Assign 握手与 PSK，不建网卡不进
+  数据面）发 PeerQuery 拿对端候选，直接向候选发 disco 探测帧测直连 RTT；
+  无响应时落回控制信道 RTT 输出 `via relay`。
+- `vrndisd peers --server ...`：列出全部已上报候选的在线 peer 及路径状态。
+
+**STUN 架构修正**：客户端候选解析改用 `c.cfg.Server` 的公网 host（原为隧道 IP
+10.77.0.1——STUN 请求经 TCP 中继走隧道，服务器看到的源是隧道内网地址，拿不到
+真实 NAT 映射）。服务器 STUN 支持双端口（`--stun-listen :5478`，`--stun-listen-extra
+:5479`）供映射比对。**注意**：候选为内网地址（`10.77.0.x:port`）即为旧客户端
+二进制未升级的症状。
+
+**管理套接字竞态**：`manageLoop` 原在退出时 `os.Remove(path)`，systemd restart
+场景下旧进程退出清理可能晚于新进程的 Remove+Listen，从而删掉新进程刚建好的
+socket 文件（表现为 `vrndisd clients` 报 `no such file`）。改为仅启动时清理
+残留。已连续 restart 两次验证。
