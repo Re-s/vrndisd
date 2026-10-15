@@ -9,8 +9,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"vrndis/internal/addr"
 	"vrndis/internal/crypto"
@@ -41,6 +45,9 @@ type Config struct {
 	// P2P 是否开启 P2P 直连（默认关闭，纯中继，兼容旧客户端）
 	P2P bool
 
+	// ManagementSocket 本机管理套接字路径（clients/status 命令实时查询，
+	// 不走客户端协议、无需 PSK）。为空时用平台默认路径；"-" 表示禁用。
+	ManagementSocket string
 }
 
 // DefaultConfig 默认配置。
@@ -87,7 +94,8 @@ type Server struct {
 	sw     *ethswitch.LearningSwitch
 	tapMAC net.HardwareAddr
 	ln     net.Listener
-	logger *log.Logger
+	logger  *log.Logger
+	mgmtLn  net.Listener // 本机管理套接字（clients/status 查询）
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -266,9 +274,10 @@ func (s *Server) Start() error {
 	s.logger.Printf("vrndis server: TAP %s 就绪（网关 %s/%d），监听 %s",
 		dev.Name(), s.cfg.Gateway, s.pool.Prefix(), s.ln.Addr())
 
-	s.wg.Add(3)
+	s.wg.Add(4)
 	go s.acceptLoop()
 	go s.tapLoop()
+	go s.manageLoop()
 	go s.tapWriter()
 	return nil
 }
@@ -288,6 +297,9 @@ func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 		s.ln.Close()
+		if s.mgmtLn != nil {
+			s.mgmtLn.Close()
+		}
 		if s.dev != nil {
 			s.dev.Close()
 		}
@@ -302,6 +314,97 @@ func (s *Server) Stop() {
 		}
 	})
 	s.wg.Wait()
+}
+
+// defaultManagementSocket 平台默认管理套接字路径。
+func defaultManagementSocket() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("ProgramData"), "vrndisd", "management.sock")
+	}
+	return "/run/vrndisd/management.sock"
+}
+
+// managementSocketPath 解析管理套接字路径（"-" 禁用返回空）。
+func (s *Server) managementSocketPath() string {
+	switch {
+	case s.cfg.ManagementSocket == "-":
+		return ""
+	case s.cfg.ManagementSocket != "":
+		return s.cfg.ManagementSocket
+	default:
+		return defaultManagementSocket()
+	}
+}
+
+// managementState 生成当前实时管理状态快照（进程内数据，无缓存）。
+func (s *Server) managementState() proto.ManagementState {
+	s.mu.RLock()
+	list := make([]proto.ClientInfo, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		lease := sess.lease
+		list = append(list, proto.ClientInfo{
+			IP:   lease.IP.String(),
+			MAC:  lease.MAC.String(),
+			Peer: sess.peer,
+			Name: sess.name,
+		})
+	}
+	s.mu.RUnlock()
+	return proto.ManagementState{
+		Version:   Version,
+		UpdatedAt: time.Now(),
+		Clients:   list,
+	}
+}
+
+// manageLoop 监听本机管理套接字，响应 clients/status 查询。
+// 每个连接读一行 ManagementRequest JSON，回 ManagementState JSON。
+func (s *Server) manageLoop() {
+	defer s.wg.Done()
+	path := s.managementSocketPath()
+	if path == "" {
+		return
+	}
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.Remove(path) // 清理上次残留
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		s.logger.Printf("vrndis server: 管理套接字监听失败 %s: %v", path, err)
+		return
+	}
+	s.mgmtLn = ln
+	defer func() {
+		ln.Close()
+		os.Remove(path)
+	}()
+	s.logger.Printf("vrndis server: 管理套接字 %s", path)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-s.stopCh:
+				return
+			default:
+				continue
+			}
+		}
+		s.handleManagementConn(conn)
+	}
+}
+
+// handleManagementConn 处理单个管理查询连接（同步短连接）。
+func (s *Server) handleManagementConn(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var req proto.ManagementRequest
+	dec := json.NewDecoder(conn)
+	if err := dec.Decode(&req); err != nil {
+		return // 非法请求直接关闭
+	}
+	// 所有命令统一返回完整实时状态快照（clients 命令取 .Clients）。
+	state := s.managementState()
+	json.NewEncoder(conn).Encode(state)
 }
 
 // SessionCount 当前在线客户端数。

@@ -3,21 +3,23 @@ package main
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"vrndis/internal/proto"
 )
 
-// fakeMgmtServer 启动一个模拟服务器：接受连接，先发 TypeAssign 握手（模拟真实
-// server.handleConn 的行为），随后处理 TypeManagement 请求并回 ManagementResponse。
-// sendExtras: 在 Assign 与 Management 响应之间再插入的非管理消息（模拟心跳/HELLO 应答等）。
-func fakeMgmtServer(t *testing.T, resp proto.ManagementResponse, sendExtras ...proto.Message) (addr string) {
+// fakeMgmtSocket 启动管理套接字模拟服务器：接受连接后读取 ManagementRequest，
+// 回 state JSON（模拟 server.handleManagementConn 行为）。
+func fakeMgmtSocket(t *testing.T, state proto.ManagementState) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	path := filepath.Join(t.TempDir(), "management.sock")
+	ln, err := net.Listen("unix", path)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("listen unix: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
 
@@ -28,121 +30,68 @@ func fakeMgmtServer(t *testing.T, resp proto.ManagementResponse, sendExtras ...p
 		}
 		defer conn.Close()
 		conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-		// 模拟真实服务器：接受连接即下发 TypeAssign 握手（Bug 3 根因）。
-		assign := proto.Assignment{IP: "10.77.0.2", Prefix: 24, Gateway: "10.77.0.1"}
-		ab, _ := json.Marshal(assign)
-		if err := proto.WriteMessage(conn, proto.TypeAssign, ab); err != nil {
+		var req proto.ManagementRequest
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
 			return
 		}
-		// 先读客户端的 Hello 握手。
-		if _, err := proto.ReadMessage(conn); err != nil {
-			return
-		}
-		// 处理 ManagementRequest。
-		if _, err := proto.ReadMessage(conn); err != nil {
-			return
-		}
-		// 插入可选的非管理消息（心跳等），应被客户端跳过。
-		for _, m := range sendExtras {
-			if err := proto.WriteMessage(conn, m.Type, m.Body); err != nil {
-				return
-			}
-		}
-		rb, _ := json.Marshal(resp)
-		proto.WriteMessage(conn, proto.TypeManagement, rb)
+		json.NewEncoder(conn).Encode(state)
 	}()
 
-	return ln.Addr().String()
+	return path
 }
 
-// TestSendManagementRequestSkipsAssignHandshake - 服务器先发 Assign 握手，再回
-// Management 响应。修复后应跳过 Assign，正确拿到 ManagementResponse。
-func TestSendManagementRequestSkipsAssignHandshake(t *testing.T) {
-	resp := proto.ManagementResponse{
-		Version: "1.0.0",
-		Clients: 1,
-		List: []proto.ClientInfo{
+// TestQueryManagementClients - clients 查询应正确解析套接字返回的状态快照。
+func TestQueryManagementClients(t *testing.T) {
+	state := proto.ManagementState{
+		Version:   "1.0.0",
+		UpdatedAt: time.Now(),
+		Clients: []proto.ClientInfo{
 			{Name: "pc-a", IP: "10.77.0.2", MAC: "02:00:00:00:00:01", Peer: "1.2.3.4:5"},
 		},
 	}
-	addr := fakeMgmtServer(t, resp)
+	path := fakeMgmtSocket(t, state)
 
-	got, err := sendManagementRequest(addr, "clients")
+	got, err := queryManagement(path, "clients")
 	if err != nil {
-		t.Fatalf("sendManagementRequest err=%v", err)
+		t.Fatalf("queryManagement err=%v", err)
 	}
-	if got.Clients != 1 || len(got.List) != 1 {
+	if got.Version != "1.0.0" || len(got.Clients) != 1 {
 		t.Fatalf("解析错误: got=%+v", got)
 	}
-	c := got.List[0]
+	c := got.Clients[0]
 	if c.Name != "pc-a" || c.MAC != "02:00:00:00:00:01" || c.Peer != "1.2.3.4:5" {
 		t.Fatalf("ClientInfo 解析错误: %+v", c)
 	}
+	if c.IP != "10.77.0.2" {
+		t.Fatalf("IP 解析错误: %s", c.IP)
+	}
 }
 
-// TestSendManagementRequestSkipsNonManagement - 服务器在 Assign 后、Management 响应前
-// 插入 TypePing 等非管理消息，应被跳过而非误报“收到非管理消息类型”。
-func TestSendManagementRequestSkipsNonManagement(t *testing.T) {
-	resp := proto.ManagementResponse{Version: "1.0.0", Clients: 0}
-	addr := fakeMgmtServer(t, resp,
-		proto.Message{Type: proto.TypePing},
-		proto.Message{Type: proto.TypeAssign, Body: []byte(`{}`)})
+// TestQueryManagementEmpty - 无在线客户端时 clients 为空列表，不报错。
+func TestQueryManagementEmpty(t *testing.T) {
+	state := proto.ManagementState{Version: "1.0.0", Clients: []proto.ClientInfo{}}
+	path := fakeMgmtSocket(t, state)
 
-	got, err := sendManagementRequest(addr, "status")
+	got, err := queryManagement(path, "clients")
 	if err != nil {
-		t.Fatalf("sendManagementRequest err=%v", err)
+		t.Fatalf("queryManagement err=%v", err)
 	}
-	if got.Version != "1.0.0" {
-		t.Fatalf("Version=%q want 1.0.0", got.Version)
-	}
-}
-
-// TestCmdClientsPrintsList - cmdClients 通过真实 TCP 往返打印在线客户端列表。
-func TestCmdClientsPrintsList(t *testing.T) {
-	resp := proto.ManagementResponse{
-		Clients: 2,
-		List: []proto.ClientInfo{
-			{Name: "a", IP: "10.77.0.2", MAC: "02:00:00:00:00:01", Peer: "1.1.1.1:5"},
-			{Name: "b", IP: "10.77.0.3", MAC: "02:00:00:00:00:02", Peer: "2.2.2.2:6"},
-		},
-	}
-	addr := fakeMgmtServer(t, resp)
-
-	out := captureStdout(t, func() {
-		if err := cmdClients([]string{"--server", addr}); err != nil {
-			t.Errorf("cmdClients err=%v", err)
-		}
-	})
-	if !strings.Contains(out, "在线客户端列表 (2)") {
-		t.Errorf("缺少列表头: %q", out)
-	}
-	if !strings.Contains(out, "a") || !strings.Contains(out, "b") {
-		t.Errorf("缺少客户端条目: %q", out)
+	if len(got.Clients) != 0 {
+		t.Fatalf("应为空列表: got=%+v", got)
 	}
 }
 
-// TestSendManagementRequestNoResponse - 服务器不回 Management 响应时返回“未收到管理响应”。
-func TestSendManagementRequestNoResponse(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+// TestQueryManagementNoServer - 套接字不存在时应给出明确错误（而非 EOF/broken pipe）。
+func TestQueryManagementNoServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.sock")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Skip("意外存在")
 	}
-	t.Cleanup(func() { ln.Close() })
-	// 服务器收到连接后只发 Assign，不回 Management，直接断开。
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		proto.WriteMessage(conn, proto.TypeAssign, []byte(`{}`))
-		conn.Read(make([]byte, 1))
-	}()
-
-	_, err = sendManagementRequest(ln.Addr().String(), "status")
-	// 服务器不回 Management 响应即关闭连接：无论在哪一步报错，都必须返回错误而非成功。
+	_, err := queryManagement(path, "clients")
 	if err == nil {
-		t.Fatalf("期望错误（服务器未回管理响应），got=nil")
+		t.Fatal("应报错")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "服务器是否在运行") {
+		t.Fatalf("错误提示不明确: %s", msg)
 	}
 }

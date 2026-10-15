@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -150,7 +151,11 @@ func cmdServer(args []string) error {
 	stun := fs.Bool("stun", false, "同时启动内置 STUN 服务器（NAT 穿透）")
 	stunListen := fs.String("stun-listen", ":5478", "STUN 监听地址（--stun 时生效）")
 	psk := fs.String("psk", "", "预共享密钥（非空时要求客户端加密握手）")
+	mgmtSock := fs.String("management-socket", "", "本机管理套接字路径（默认 /run/vrndisd/management.sock，- 禁用）")
 	fs.Parse(args)
+	if *mgmtSock != "" {
+		cfg.ManagementSocket = *mgmtSock
+	}
 	cfg.DNS = splitCSV(fs.Lookup("dns").Value.String())
 	if *psk != "" {
 		cfg.PSK = []byte(*psk)
@@ -278,6 +283,7 @@ func cmdService(args []string) error {
 	hbTimeout := fs.Duration("heartbeat-timeout", 0, "client: 心跳超时阈值（0=默认 30s）")
 	stunServer := fs.String("stun-server", "", "client: STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时启用加密握手，server/client 通用）")
+	mgmtSock := fs.String("management-socket", "", "server: 本机管理套接字路径（默认平台默认，- 禁用）")
 	output := fs.String("output", "", "export: 写入的目标文件（默认打印到 stdout）")
 	printCfg := fs.Bool("print-config", false, "install: 仅打印将写入的配置 JSON，不安装服务")
 	fs.Parse(args[1:])
@@ -330,6 +336,8 @@ func cmdService(args []string) error {
 				cfg.STUNServer = *stunServer
 			case "psk":
 				cfg.PSK = *psk
+			case "management-socket":
+				cfg.ManagementSocket = *mgmtSock
 			}
 		})
 		if err := cfg.Validate(); err != nil {
@@ -566,72 +574,66 @@ func defaultConfigPath() string {
 	return service.DefaultConfigPath()
 }
 
-// sendManagementRequest 建立管理连接并发送管理请求，返回管理响应。
-// 服务器在连接建立时会先给客户端下发 TypeAssign 握手（假定所有连接都是普通 RNDIS 客户端），
-// 因此这里先发 Hello 握手，随后读取并跳过 Assign/心跳等非管理消息，直到拿到 TypeManagement 响应。
-// 修复：之前直接期望第一个响应就是 TypeManagement，会撞上服务器先发的 Assign 而报“收到非管理消息类型”。
-func sendManagementRequest(serverAddr, cmd string) (*proto.ManagementResponse, error) {
-	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
+// queryManagement 经本机管理套接字查询服务器实时状态（进程内数据）。
+// 不走客户端 TCP 协议、无需 PSK 握手。path 为空时用平台默认套接字路径。
+func queryManagement(path, cmd string) (*proto.ManagementState, error) {
+	if path == "" {
+		path = defaultManagementSocketPath()
+	}
+	conn, err := net.DialTimeout("unix", path, 3*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("连接服务器失败: %v", err)
+		return nil, fmt.Errorf("连接管理套接字失败 %s（服务器是否在运行？）: %v", path, err)
 	}
 	defer conn.Close()
-
-	// 模拟客户端握手：先发 HELLO（服务器兼容空/简单 body，仅用于登记名称）。
-	if err := proto.WriteMessage(conn, proto.TypeHello, []byte(`{"name":"vrndisd-cli"}`)); err != nil {
-		return nil, fmt.Errorf("发送握手失败: %v", err)
-	}
-
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	req := proto.ManagementRequest{Cmd: cmd}
-	reqBytes, _ := json.Marshal(req)
-	if err := proto.WriteMessage(conn, proto.TypeManagement, reqBytes); err != nil {
+	if err := json.NewEncoder(conn).Encode(&req); err != nil {
 		return nil, fmt.Errorf("发送管理请求失败: %v", err)
 	}
-
-	// 服务器先发 Assign 握手，后回 Management 响应；跳过其间任何非管理消息。
-	for i := 0; i < 8; i++ {
-		msg, err := proto.ReadMessage(conn)
-		if err != nil {
-			return nil, fmt.Errorf("读取响应失败: %v", err)
-		}
-		if msg.Type == proto.TypeManagement {
-			var resp proto.ManagementResponse
-			if err := json.Unmarshal(msg.Body, &resp); err != nil {
-				return nil, fmt.Errorf("解析响应失败: %v", err)
-			}
-			return &resp, nil
-		}
-		// 其它类型（Assign/Hello 应答/Pong 等）为握手与心跳，跳过继续等待管理响应。
+	var state proto.ManagementState
+	if err := json.NewDecoder(conn).Decode(&state); err != nil {
+		return nil, fmt.Errorf("读取响应失败: %v", err)
 	}
-	return nil, fmt.Errorf("未收到管理响应")
+	return &state, nil
+}
+
+// defaultManagementSocketPath 平台默认管理套接字路径（与服务器端一致）。
+func defaultManagementSocketPath() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("ProgramData"), "vrndisd", "management.sock")
+	}
+	return "/run/vrndisd/management.sock"
 }
 
 // cmdStatus - 查询服务器状态和版本信息
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
-	serverAddr := fs.String("server", "127.0.0.1:7777", "服务器地址")
+	socketPath := fs.String("socket", "", "管理套接字路径（默认服务器平台默认路径）")
 	fs.Parse(args)
 
-	resp, err := sendManagementRequest(*serverAddr, "status")
+	state, err := queryManagement(*socketPath, "status")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("状态: 版本=%s 在线客户端=%d\n", resp.Version, resp.Clients)
+	fmt.Printf("状态: 版本=%s 在线客户端=%d\n", state.Version, len(state.Clients))
 	return nil
 }
 
 // cmdClients - 查询在线客户端列表
 func cmdClients(args []string) error {
 	fs := flag.NewFlagSet("clients", flag.ExitOnError)
-	serverAddr := fs.String("server", "127.0.0.1:7777", "服务器地址")
+	socketPath := fs.String("socket", "", "管理套接字路径（默认服务器平台默认路径）")
 	fs.Parse(args)
 
-	resp, err := sendManagementRequest(*serverAddr, "clients")
+	state, err := queryManagement(*socketPath, "clients")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("在线客户端列表 (%d):\n", resp.Clients)
-	for i, c := range resp.List {
+	fmt.Printf("在线客户端列表 (%d)：\n", len(state.Clients))
+	if len(state.Clients) == 0 {
+		fmt.Println("  （无在线客户端）")
+	}
+	for i, c := range state.Clients {
 		fmt.Printf("  %d. %s (%s/%s) -> %s\n", i+1, c.IP, c.Name, c.MAC, c.Peer)
 	}
 	return nil

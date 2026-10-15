@@ -28,7 +28,8 @@ echo "[soak] 二进制: $BIN  时长: ${DURATION}s  重连间隔: ${RECONNECT_IN
 
 # ---- 1. 启动测试服务器（前台模式后台运行，独立端口/网段）----
 "$BIN" server --listen 127.0.0.1:17777 --network 10.250.0.0/24 \
-    --gateway 10.250.0.1 --tap "$TAP_SVR" >>"$LOG" 2>&1 &
+    --gateway 10.250.0.1 --tap "$TAP_SVR" \
+    --management-socket /tmp/vrndis-soak/management.sock >>"$LOG" 2>&1 &
 srv_pid=$!
 trap '{
     kill "'"$srv_pid"'" 2>/dev/null || true

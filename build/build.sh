@@ -72,7 +72,7 @@ build_target() {
     local output_dir="$BUILD_DIR/$name"
     mkdir -p "$output_dir"
 
-    local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion"
+    local ldflags="-s -w -X $VERSION_IMPORT.Version=$gitversion -X vrndis/internal/server.Version=$gitversion"
     [ "$RELEASE" = true ] && ldflags="$ldflags -s -w"
     LDFLAGS="$ldflags"
 

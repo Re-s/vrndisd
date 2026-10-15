@@ -6,6 +6,7 @@
 package proto
 
 import (
+	"time"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -152,6 +153,14 @@ type ManagementResponse struct {
 	Version string       `json:"version"`
 	Clients int          `json:"clients"`
 	List    []ClientInfo `json:"list,omitempty"`
+}
+
+// ManagementState 本地管理状态文件（替代 clients 命令 TCP 自连查询）：
+// 服务器在启停与客户端上下线时写入，vrndisd clients/status 直接读取。
+type ManagementState struct {
+	Version   string       `json:"version"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Clients   []ClientInfo `json:"clients"`
 }
 
 // CustomClientInfo for JSON

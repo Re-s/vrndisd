@@ -68,6 +68,9 @@ type Config struct {
 	// 加密
 	PSK string `json:"psk,omitempty"`
 
+	// 服务器侧：本机管理套接字路径（clients/status 命令查询用，无需 PSK）
+	ManagementSocket string `json:"management_socket,omitempty"`
+
 	// 客户端侧：P2P、STUN 与自愈参数。
 	STUNServer        string   `json:"stun_server,omitempty"`
 	Reconnect         bool     `json:"reconnect,omitempty"`
