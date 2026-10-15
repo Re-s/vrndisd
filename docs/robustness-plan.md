@@ -149,3 +149,20 @@ metric 100` 没有排除服务器端点 —— 去服务器公网 IP 的包（�
 MASQUERADE，vrndisd 不自动操作 iptables，脚本与 systemd unit 见
 `deploy/vrndis-firewall.sh`（幂等：先清后建）。生产已部署验证：
 网关 ping 0 丢包、1.1.1.1 正常、连接不再周期性 reset。
+
+## 2026-10-15 补充：Android netd fwmark 绕过（Termux root 模式 ping 不通网关）
+
+**现象**：Termux root 跑 `vrndisd client`，连接成功、地址/直连路由/ARP
+全部配置正确（`ip neigh` 甚至学到网关），但 ping 网关无响应，服务器
+tcpdump 抓不到任何客户端帧。
+
+**根因**：Android netd 用 `ip rule` 把本地流量按 uid/oif 锁进物理网卡
+专用路由表（如 `11000/17000: iif lo oif wlan0 lookup 1009`），
+`ip route get 10.77.0.1` 显示走 `table 1009 via 192.168.1.1 dev wlan0`
+——main 表的隧道直连路由根本查不到，包被 wlan0 默认路由吞掉。
+
+**修复（tap_android.go Up()）**：参照系统给桥接网络（ds-br0，prio 6090）
+的现成范式，插入 `ip rule add to <subnet> lookup main prio 6091`，先于
+11000 命中，隧道流量回到 main 表。失败仅记 stderr 不阻断（无该机制的
+ROM 不受影响）；Close() 尝试删除（残留亦安全：表内无路由时 fall through
+回到物理路径）。Cross-build 目标加入 `build.sh android`（arm64）。

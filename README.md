@@ -51,6 +51,25 @@ iptables -t nat -A POSTROUTING -s 10.77.0.0/24 -j MASQUERADE   # SNAT 回包
 规则务必持久化（否则重启丢失）。生产机可用幂等脚本 + oneshot 服务，
 脚本示例见仓库 `deploy/vrndis-firewall.sh`。
 
+## Android（Termux + root）
+
+在 Termux 中以 root 运行 vrndisd（需自行交叉编译 `build/build.sh android`，
+或取发行二进制），即可获得与 Linux 相同的二层 TAP 隧道：
+
+```bash
+# 手机（root shell）
+./vrndisd client --server 服务器IP:7777
+```
+
+说明：
+- `Up()` 会自动插入 `ip rule add to <隧道网段> lookup main prio 6091`，
+  绕过 Android netd 的 fwmark 路由锁定（否则本地流量被锁进物理网卡专用
+  路由表，ping 网关会被劫持去 wlan0，即使 main 表路由正确也不生效）。
+  规则命中但 main 表无对应路由时会 fall through，故网卡关闭后残留安全。
+- 32 位 Android(arm) 需 NDK cgo，仅提供 arm64 构建。
+- 若需要全局走隧道（VPN 模式），应使用 VpnService 形式的客户端，
+  Termux 裸 TAP 只能保证"隧道子网可达"。
+
 ### 持久化服务（开机自启 + 崩溃自拉）
 
 ```bash

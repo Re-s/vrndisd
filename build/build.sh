@@ -1,6 +1,6 @@
 #!/bin/bash
 # vrndis-go cross-compile build script.
-# Targets: linux amd64/arm64/armv6/armv7 and windows amd64.
+# Targets: linux amd64/arm64/armv6/armv7, windows amd64, android arm64/arm (可选).
 # STUN server is integrated into vrndisd: use "vrndisd stun-server" command.
 
 set -e
@@ -31,6 +31,7 @@ RELEASE=false
 for arg in "$@"; do
     case $arg in
         amd64|arm64|armv6|armv7|windows) TARGETS="$arg" ;;
+        android) TARGETS="android-arm64" ;;
         all) TARGETS="amd64 arm64 armv6 armv7 windows" ;;
         release) RELEASE=true ;;
         clean)
@@ -40,7 +41,7 @@ for arg in "$@"; do
             ;;
         *)
             echo "unknown argument: $arg" >&2
-            echo "usage: $0 [amd64|arm64|armv6|armv7|windows|all] [release] [clean]" >&2
+            echo "usage: $0 [amd64|arm64|armv6|armv7|windows|android|all] [release] [clean]" >&2
             exit 2
             ;;
     esac
@@ -55,6 +56,7 @@ target_props() {
         arm64)   echo "linux   arm64 0 vrndisd" ;;
         armv6)   echo "linux   arm   6 vrndisd" ;;
         armv7)   echo "linux   arm   7 vrndisd" ;;
+        android-arm64) echo "android arm64 0 vrndisd" ;;
         windows) echo "windows amd64 0 vrndisd.exe" ;;
         *) return 1 ;;
     esac

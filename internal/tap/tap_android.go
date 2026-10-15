@@ -5,6 +5,7 @@ package tap
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -29,6 +30,14 @@ const (
 // （SIOCSIFADDR 不会自动建立直连路由，且不带 netd 网络命名空间/路由表上下文），
 // 而是走 toybox `ip addr add <ip>/<prefix> dev <tap>` 自动建 connected 路由，
 // 再用 `ip route add <net>/<prefix> dev <tap> scope link` 与带 onlink 的默认路由。
+//
+// 关键差异——netd fwmark 绕过：Android netd 用 ip rule 把本地流量按 uid/oif
+// 锁进物理网卡专用的路由表（如 11000/17000: iif lo oif wlan0 lookup 1009），
+// main 表里的隧道直连路由根本查不到，ping 网关会被表 1009 的默认路由劫持去
+// wlan0。系统给桥接网络（如 ds-br0）的现成范式是在低 prio 插 to 规则查 main：
+// `ip rule add to <net> lookup main prio 6091`，先于 11000 命中，隧道流量回到
+// main 表。规则命中但表内无路由时会 fall through 到下一条规则，故网卡关闭后
+// 残留的 to 规则安全（恢复物理路径）。
 type androidTAP struct {
 	fd     int
 	name   string
@@ -131,6 +140,14 @@ func (t *androidTAP) Up() error {
 				return fmt.Errorf("ip route add subnet: %v (%s)", err, out)
 			}
 		}
+		// netd fwmark 绕过：详见类型注释。失败仅记录（pref pref）不阻断，
+		// 部分无该机制 ROM 上不影响其余路径。
+		if out, err := exec.Command("ip", "rule", "add", "to", t.subnet.String(),
+			"lookup", "main", "prio", "6091").CombinedOutput(); err != nil {
+			if !strings.Contains(string(out), "File exists") {
+				fmt.Fprintf(os.Stderr, "vrndis/tap: ip rule add (netd 绕过) 失败: %v (%s)\n", err, out)
+			}
+		}
 	}
 	return nil
 }
@@ -160,6 +177,12 @@ func (t *androidTAP) SetPeerInfo(localMAC, gatewayMAC net.HardwareAddr, localIP 
 }
 
 func (t *androidTAP) Close() error {
+	// 清理 netd 绕过规则（残留也安全——表内无路由会 fall through，
+	// 删除仅为整洁）。失败忽略（网卡可能已不在）。
+	if t.subnet != nil {
+		_ = exec.Command("ip", "rule", "del", "to", t.subnet.String(),
+			"lookup", "main", "prio", "6091").Run()
+	}
 	syscall.Close(t.ctl)
 	return syscall.Close(t.fd)
 }
