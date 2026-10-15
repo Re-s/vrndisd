@@ -377,8 +377,14 @@ func (s *Server) managementState() proto.ManagementState {
 	}
 }
 
+// managementWatchInterval 管理套接字自愈检测间隔。
+// socket 文件被外部删除（云安全 agent / 运维脚本 / tmpfiles 清理）后，
+// 旧 listener 仍 bind 但不可达，按此间隔检测并重建。包级变量便于测试调小。
+var managementWatchInterval = 10 * time.Second
+
 // manageLoop 监听本机管理套接字，响应 clients/status 查询。
 // 每个连接读一行 ManagementRequest JSON，回 ManagementState JSON。
+// socket 文件被外部删除时自愈重建（不退出 goroutine，保证持续可查询）。
 func (s *Server) manageLoop() {
 	defer s.wg.Done()
 	path := s.managementSocketPath()
@@ -386,30 +392,78 @@ func (s *Server) manageLoop() {
 		return
 	}
 	os.MkdirAll(filepath.Dir(path), 0755)
+	for {
+		ln := s.listenManagement(path)
+		if ln == nil {
+			// 监听失败（路径占用等）：等待后重试，不退出
+			select {
+			case <-s.stopCh:
+				return
+			case <-time.After(managementWatchInterval):
+			}
+			continue
+		}
+		if !s.acceptManagement(ln, path) {
+			return // 收到 stop 信号：退出（不删除 socket 文件）
+		}
+	}
+}
+
+// listenManagement 创建（或重建）管理套接字 listener 并记录到 s.mgmtLn。
+// 每次调用先清理残留 socket 文件（systemd restart 竞态由"启动时清理 +
+// 退出不删除"组合避免，见 50cacf1；外部删除后的孤儿由本函数重建）。
+func (s *Server) listenManagement(path string) net.Listener {
 	os.Remove(path) // 清理上次残留
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		s.logger.Printf("vrndis server: 管理套接字监听失败 %s: %v", path, err)
-		return
+		return nil
+	}
+	// UnixListener.Close 默认会 unlink socket 文件：restart 时序中旧进程的
+	// Close 可能晚于新进程的 Listen，从而误删新进程的文件（50cacf1 移除了
+	// 显式 defer Remove 却未堵住此路径，socket 仍然"消失"）。显式关闭该行为，
+	// 删除完全由"启动时清理残留"承担。
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
 	}
 	s.mgmtLn = ln
-	// 不在退出时删除 socket 文件：systemd restart 场景下旧进程的退出
-	// 清理可能晚于新进程的 Remove+Listen，从而误删新进程刚建好的文件
-	// （表现为管理套接字"消失"）。残留文件由下次启动时的 Remove 清理。
-	defer ln.Close()
 	s.logger.Printf("vrndis server: 管理套接字 %s", path)
+	return ln
+}
 
+// acceptManagement 接受管理查询连接。
+// 返回 false 表示收到 stop 信号（manageLoop 应退出）；
+// 返回 true 表示 listener 不可用（socket 被外部删除或意外关闭），应重建。
+func (s *Server) acceptManagement(ln net.Listener, path string) bool {
+	// unix listener 支持 SetDeadline：周期唤醒检测 socket 文件是否被外部删除。
+	// 非 unix listener（不会发生）退化为阻塞 accept，无自愈。
+	ul, hasDeadline := ln.(*net.UnixListener)
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-s.stopCh:
-				return
-			default:
-				continue
-			}
+		if hasDeadline {
+			_ = ul.SetDeadline(time.Now().Add(managementWatchInterval))
 		}
-		s.handleManagementConn(conn)
+		conn, err := ln.Accept()
+		if err == nil {
+			s.handleManagementConn(conn)
+			continue
+		}
+		select {
+		case <-s.stopCh:
+			ln.Close()
+			return false
+		default:
+		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			// 自愈检测：listener 仍 bind 但 socket 文件被外部删除
+			if _, serr := os.Stat(path); serr != nil {
+				s.logger.Printf("vrndis server: 管理套接字 %s 被外部删除，重建", path)
+				ln.Close()
+				return true
+			}
+			continue
+		}
+		// 非超时错误（listener 被关闭等）：重建
+		return true
 	}
 }
 
