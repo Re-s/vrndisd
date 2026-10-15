@@ -362,11 +362,11 @@ func TestClientEncryptedPingDispatch(t *testing.T) {
 	defer stop()
 
 	c := New(Config{
-		Server:       addr,
-		PSK:          []byte("psk-regress"),
-		TapName:      "c",
-		DialTimeout:  2 * time.Second,
-		Device:       dev,
+		Server:      addr,
+		PSK:         []byte("psk-regress"),
+		TapName:     "c",
+		DialTimeout: 2 * time.Second,
+		Device:      dev,
 	})
 	if _, err := c.Connect(); err != nil {
 		t.Fatal(err)
@@ -382,5 +382,73 @@ func TestClientEncryptedPingDispatch(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if c.Closed() {
 		t.Fatal("连接已断开（PING 被误写网卡导致 EINVAL）")
+	}
+}
+
+// protectedFake 包装 Fake，记录默认路由调用参数。
+type protectedFake struct {
+	*tap.Fake
+	gw       net.IP
+	exclude  net.IP
+	protCall int
+	plainCal int
+}
+
+func (p *protectedFake) AddDefaultRouteProtected(gateway, exclude net.IP) error {
+	p.gw, p.exclude, p.protCall = gateway, exclude, p.protCall+1
+	return nil
+}
+
+func TestClientDefaultRouteExcludesServer(t *testing.T) {
+	dev := &protectedFake{Fake: tap.NewFake("c-dr")}
+	addr, stop := fakeServer(t, serverAssign)
+	defer stop()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{
+		Server:       addr,
+		TapName:      "c-dr",
+		Name:         "test",
+		DefaultRoute: true,
+		DialTimeout:  2 * time.Second,
+		Device:       dev, // 包装设备实现 AddDefaultRouteProtected
+	})
+	if _, err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	// 默认路由须走保护路径（exclude = 服务器地址）。
+	if dev.protCall != 1 {
+		t.Fatalf("AddDefaultRouteProtected 调用次数 = %d，want 1", dev.protCall)
+	}
+	if !dev.gw.Equal(net.ParseIP("10.77.0.1")) {
+		t.Fatalf("gateway = %v，want 10.77.0.1", dev.gw)
+	}
+	if !dev.exclude.Equal(net.ParseIP(host)) {
+		t.Fatalf("exclude = %v，want %s", dev.exclude, host)
+	}
+}
+
+func TestClientNoDefaultRouteSkipsProtection(t *testing.T) {
+	dev := &protectedFake{Fake: tap.NewFake("c-nodr")}
+	addr, stop := fakeServer(t, serverAssign)
+	defer stop()
+	c := New(Config{
+		Server:       addr,
+		TapName:      "c-nodr",
+		Name:         "test",
+		DefaultRoute: false,
+		DialTimeout:  2 * time.Second,
+		Device:       dev,
+	})
+	if _, err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	if dev.protCall != 0 {
+		t.Fatalf("未启用 default route 仍调用了 AddDefaultRouteProtected (%d 次)", dev.protCall)
 	}
 }

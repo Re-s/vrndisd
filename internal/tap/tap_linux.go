@@ -5,7 +5,9 @@ package tap
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -146,6 +148,52 @@ func (t *linuxTAP) Up() error {
 	return nil
 }
 
+// AddDefaultRouteProtected 安装隧道默认路由，同时把服务器端点钉在物理
+// 路径上（metric 50 优先于默认路由 metric 100），避免默认路由劫持隧道
+// 自身的 TCP 连接（劫持会导致网关 ARP 永久无法完成、连接周期性 reset）。
+//
+// 排除路由的物理路径由安装前的 `ip route get` 动态探测，无需调用方提供
+// 物理网关；重连时 ip route get 会命中已存在的排除路由（metric 50 优先），
+// 随后的 add 返回 EEXIST 被忽略，整体幂等。探测或安装失败仅记录错误，
+// 默认路由照常安装（保持与旧版本行为一致）。
+func (t *linuxTAP) AddDefaultRouteProtected(gateway, exclude net.IP) error {
+	if exclude != nil {
+		if err := t.addExcludeRoute(exclude); err != nil {
+			// 排除失败不阻断默认路由安装（保持旧行为）；但调用方应知
+			// 此错误会埋下"隧道劫持自身连接"的隐患，故返回前记录到 stderr。
+			fmt.Fprintf(os.Stderr, "vrndis/tap: 排除服务器端点路由失败（默认路由仍将安装）: %v\n", err)
+		}
+	}
+	return t.AddDefaultRoute(gateway)
+}
+
+// addExcludeRoute 为 server 安装 /32 host 路由走物理网卡。
+func (t *linuxTAP) addExcludeRoute(server net.IP) error {
+	server = server.To4()
+	if server == nil {
+		return fmt.Errorf("排除路由仅支持 IPv4: %v", server)
+	}
+	out, err := exec.Command("ip", "route", "get", server.String()).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip route get %s: %v (%s)", server, err, strings.TrimSpace(string(out)))
+	}
+	gw, dev := parseRouteGet(string(out))
+	if dev == "" {
+		return fmt.Errorf("ip route get %s 未解析出dev: %s", server, strings.TrimSpace(string(out)))
+	}
+	// 有物理网关（典型家庭/云网络）时带 via；点对点链路无 via。
+	args := []string{"route", "add", server.String() + "/32"}
+	if gw != nil {
+		args = append(args, "via", gw.String())
+	}
+	args = append(args, "dev", dev, "metric", "50")
+	out, err = exec.Command("ip", args...).CombinedOutput()
+	if err != nil && !isAlreadyExists(err, out) {
+		return fmt.Errorf("ip route add exclude %s: %v (%s)", server, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (t *linuxTAP) AddDefaultRoute(gateway net.IP) error {
 	// 根因修复（Destination Host Unreachable）：
 	// 裸 `ip route replace default via <gw> dev <tap>` 会装一条 scope global 且
@@ -177,6 +225,26 @@ func (t *linuxTAP) AddDefaultRoute(gateway net.IP) error {
 // 接口实现为空操作。
 func (t *linuxTAP) SetPeerInfo(localMAC, gatewayMAC net.HardwareAddr, localIP net.IP) error {
 	return nil
+}
+
+// parseRouteGet 解析 `ip route get <dst>` 输出的第一行，提取 via 网关与 dev 网卡。
+// 例: "203.0.113.1 via 192.168.1.1 dev wlp2s0 src 192.168.1.100 uid 0\n"
+// 直连场景无 via（"… dev eth0 src …"），gw 返回 nil。
+func parseRouteGet(out string) (gw net.IP, dev string) {
+	fs := strings.Fields(strings.TrimSpace(out))
+	for i := 0; i+1 < len(fs); i++ {
+		switch fs[i] {
+		case "via":
+			if gw == nil {
+				gw = net.ParseIP(fs[i+1])
+			}
+		case "dev":
+			if dev == "" {
+				dev = fs[i+1]
+			}
+		}
+	}
+	return gw, dev
 }
 
 // isAlreadyExists 定义在 route_common.go（linux/android 共享）。

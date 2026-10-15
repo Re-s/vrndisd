@@ -220,7 +220,20 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	}
 	if c.cfg.DefaultRoute {
 		gw := net.ParseIP(assign.Gateway)
-		if err := dev.AddDefaultRoute(gw); err != nil {
+		// 默认路由必须排除服务器端点：否则去服务器公网 IP 的包（含隧道
+		// TCP 连接自身的 ACK/心跳）会被劫持进隧道，而隧道网关的 ARP
+		// 应答又依赖这条连接 → 死锁 → "Destination Host Unreachable"。
+		var exclude net.IP
+		if host, _, err := net.SplitHostPort(c.cfg.Server); err == nil {
+			exclude = net.ParseIP(host)
+		}
+		if rp, ok := dev.(interface {
+			AddDefaultRouteProtected(gateway, exclude net.IP) error
+		}); ok && exclude != nil {
+			if err := rp.AddDefaultRouteProtected(gw, exclude); err != nil {
+				c.logger.Printf("vrndis client: 设置默认路由失败（继续运行）: %v", err)
+			}
+		} else if err := dev.AddDefaultRoute(gw); err != nil {
 			c.logger.Printf("vrndis client: 设置默认路由失败（继续运行）: %v", err)
 		}
 	}
