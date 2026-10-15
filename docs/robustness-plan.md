@@ -125,3 +125,27 @@ sudo bash tests/soak.sh /path/to/vrndisd 86400 30     # 24h，每 30s 重连
 
 **通过标准**：L1-L3 全绿；L4 fuzz 30min 无 crash；L5 丢包 0%、重连 100/100 成功；
 L6 24h 内存增长 < 5% 且无 goroutine/线程泄漏。
+
+---
+
+## 2026-10-15 补充：-default-route 劫持隧道自身连接 + 服务器侧 NAT
+
+**现象**：Linux 客户端加 `-default-route` 接入生产后 ping 网关/外网全部
+`Destination Host Unreachable`，连接每 20-30s 被 reset。
+
+**根因**：`AddDefaultRoute` 安装的 `default via <gw> dev <tap> onlink
+metric 100` 没有排除服务器端点 —— 去服务器公网 IP 的包（含隧道 TCP
+连接的 ACK/心跳）也被劫持进虚拟网卡，而网关 ARP 应答又要经这条连接
+回送，死锁。服务器 `tcpdump` 抓不到任何客户端帧（包从未离开过客户端）。
+
+**修复（b0a00f8 + 0017840）**：客户端走可选 `AddDefaultRouteProtected`
+路径 —— 安装默认路由前用 `ip route get` 探测物理路径，为服务器端点
+装 `/32` host 路由 metric 50（优先于隧道默认路由 100），重连幂等
+（EEXIST 忽略）。Windows 采取保守策略：排除失败则拒绝安装默认路由
+（避免掐断 RDP 会话）。回归测试 `TestClientDefaultRouteExcludesServer`、
+`TestClientNoDefaultRouteSkipsProtection`、`TestParseRouteGet`。
+
+**服务器侧**：`-default-route` 走外网还需 ip_forward + FORWARD 放行 +
+MASQUERADE，vrndisd 不自动操作 iptables，脚本与 systemd unit 见
+`deploy/vrndis-firewall.sh`（幂等：先清后建）。生产已部署验证：
+网关 ping 0 丢包、1.1.1.1 正常、连接不再周期性 reset。

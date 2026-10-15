@@ -1,0 +1,13 @@
+[Unit]
+Description=vrndis tunnel firewall/NAT rules
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/vrndis-firewall.sh
+ExecStop=/usr/local/bin/vrndis-firewall.sh --remove
+
+[Install]
+WantedBy=multi-user.target

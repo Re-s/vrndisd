@@ -36,6 +36,21 @@ sudo ./vrndisd client --server 服务器IP:7777
 # 加 --default-route 则全部流量走隧道（VPN 模式）
 ```
 
+### 服务器侧：转发与 NAT（--default-route 走外网的前提）
+
+若希望客户端经隧道访问外网，服务器除 `--listen` 外还需要内核转发 +
+防火墙规则（vrndisd 不自动操作 iptables，交由运维用熟悉的方式管理）：
+
+```bash
+sysctl -w net.ipv4.ip_forward=1
+iptables -I FORWARD 1 -i vrndis0 -j ACCEPT     # 放行隧道入站转发
+iptables -I FORWARD 1 -o vrndis0 -j ACCEPT     # 放行返程
+iptables -t nat -A POSTROUTING -s 10.77.0.0/24 -j MASQUERADE   # SNAT 回包
+```
+
+规则务必持久化（否则重启丢失）。生产机可用幂等脚本 + oneshot 服务，
+脚本示例见仓库 `deploy/vrndis-firewall.sh`。
+
 ### 持久化服务（开机自启 + 崩溃自拉）
 
 ```bash
@@ -49,7 +64,8 @@ sudo ./vrndisd service uninstall
 # 客户端模式服务
 sudo ./vrndisd service install --mode client --server 1.2.3.4:7777 --default-route
 
-# Windows（管理员 CMD/PowerShell，wintun.dll 放在 exe 同目录）
+# Windows（管理员 CMD/PowerShell；wintun.dll 已内嵌进 exe，
+# 首次运行自动释放到 exe 同目录，单文件部署）
 vrndisd.exe service install --mode server --listen 0.0.0.0:7777
 vrndisd.exe service status
 vrndisd.exe service uninstall
