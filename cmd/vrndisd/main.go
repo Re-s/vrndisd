@@ -118,7 +118,9 @@ func usage() {
   vrndisd netcheck --server 1.2.3.4 --extra-stun stun.l.google.com:19302
 
 示例（ping / peers）：
+  vrndisd ping 10.77.0.4                      # 免输：自动读取已安装配置的服务器/PSK
   vrndisd ping 10.77.0.4 --server 1.2.3.4:7777 --psk yourpsk
+  vrndisd peers                              # 同上，列出全部在线 peer
   vrndisd peers --server 1.2.3.4:7777 --psk yourpsk
 
 示例：
@@ -255,6 +257,62 @@ func discoProbe(timeout time.Duration, cand string) (time.Duration, error) {
 	}
 }
 
+// loadInstalledConfig 从默认路径加载已安装服务配置（service install 写入）。
+// 包级变量便于单测注入。
+var loadInstalledConfig = func() (*service.Config, error) {
+	return service.Load(service.DefaultConfigPath())
+}
+
+// resolvePeerFlags 为 ping/peers 解析服务器参数：优先命令行 flag，
+// 缺省回退到已安装服务配置（service install 写入 DefaultConfigPath），
+// 实现"本机已配置客户端/服务器时免输 --server/--psk"。
+// server 模式配置回退到回环地址直连本机服务器。
+func resolvePeerFlags(server, psk, name string) (string, string, string, error) {
+	if server != "" {
+		return server, psk, name, nil
+	}
+	cfg, err := loadInstalledConfig()
+	if err != nil {
+		return "", "", "", fmt.Errorf(
+			"--server 必填（未指定且无法读取已安装配置 %s: %v；"+
+				"可用 vrndisd service install --mode client --server HOST:7777 预置）",
+			service.DefaultConfigPath(), err)
+	}
+	switch cfg.Mode {
+	case "client":
+		if cfg.Server == "" {
+			return "", "", "", errors.New("已安装配置为 client 模式但缺少 server 地址")
+		}
+	case "server":
+		if cfg.Listen == "" {
+			return "", "", "", errors.New("已安装配置为 server 模式但缺少 listen 地址")
+		}
+		cfg.Server = loopbackAddr(cfg.Listen)
+	default:
+		return "", "", "", fmt.Errorf("已安装配置 mode 无效: %q", cfg.Mode)
+	}
+	if psk == "" {
+		psk = cfg.PSK
+	}
+	if name == "" {
+		name = cfg.Name
+	}
+	return cfg.Server, psk, name, nil
+}
+
+// loopbackAddr 把监听地址中的通配 host（0.0.0.0/[::]/空）替换为 127.0.0.1，
+// 供本机回环连接；其它 host 原样返回。
+func loopbackAddr(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return listen
+}
+
 func probeMagicBytes() []byte {
 	return []byte("vrndis-p2p-probe\x00\x01")
 }
@@ -267,24 +325,28 @@ func cmdPing(args []string) error {
 	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
 	count := fs.Int("count", 5, "探测次数")
 	wait := fs.Duration("wait", 3*time.Second, "每次探测等待超时")
-	name := fs.String("name", "ping", "客户端名称")
+	name := fs.String("name", "", "客户端名称（默认 ping，或取自已安装配置）")
 	positional := parseLoose(fs, args)
 	target := ""
 	if len(positional) > 0 {
 		target = positional[0]
 	}
-	if *server == "" {
-		return errors.New("--server 必填")
+	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name)
+	if err != nil {
+		return err
+	}
+	if nameStr == "" {
+		nameStr = "ping"
 	}
 	if target == "" {
-		return errors.New("用法: vrndisd ping <隧道IP或MAC> --server host:port")
+		return errors.New("用法: vrndisd ping <隧道IP或MAC>")
 	}
 
 	var pskBytes []byte
-	if *psk != "" {
-		pskBytes = []byte(*psk)
+	if pskStr != "" {
+		pskBytes = []byte(pskStr)
 	}
-	sess, _, err := ctrl.Dial(*server, *name, pskBytes, 8*time.Second)
+	sess, _, err := ctrl.Dial(serverAddr, nameStr, pskBytes, 8*time.Second)
 	if err != nil {
 		return err
 	}
@@ -342,17 +404,21 @@ func cmdPeers(args []string) error {
 	server := fs.String("server", "", "服务器地址 host:port")
 	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
 	wait := fs.Duration("wait", 3*time.Second, "每个 peer 探测超时")
-	name := fs.String("name", "peers", "客户端名称")
+	name := fs.String("name", "", "客户端名称（默认 peers，或取自已安装配置）")
 	parseLoose(fs, args)
-	if *server == "" {
-		return errors.New("--server 必填")
+	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name)
+	if err != nil {
+		return err
+	}
+	if nameStr == "" {
+		nameStr = "peers"
 	}
 
 	var pskBytes []byte
-	if *psk != "" {
-		pskBytes = []byte(*psk)
+	if pskStr != "" {
+		pskBytes = []byte(pskStr)
 	}
-	sess, _, err := ctrl.Dial(*server, *name, pskBytes, 8*time.Second)
+	sess, _, err := ctrl.Dial(serverAddr, nameStr, pskBytes, 8*time.Second)
 	if err != nil {
 		return err
 	}

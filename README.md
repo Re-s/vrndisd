@@ -118,12 +118,16 @@ vrndisd netcheck --server 203.0.113.1 --extra-stun stun.l.google.com:19302
 # --extra-stun 可选第三方 STUN 作交叉比对。
 
 # 2) ping：到指定 peer 的路径探测（relay vs p2p + RTT）
-vrndisd ping 10.77.0.4 --server 203.0.113.1:7777 --psk yourpsk --count 5
+vrndisd ping 10.77.0.4 --count 5
+# --server/--psk 可省略：回退读已安装服务配置（vrndisd service install 写入的
+# /etc/vrndisd.conf 或 %ProgramData%\vrndisd\vrndisd.conf）；
+# 本机即服务器时自动用 listen 地址回环直连。显式指定仍然优先：
+#   vrndisd ping 10.77.0.4 --server 203.0.113.1:7777 --psk yourpsk
 # 若本地到该 peer 的直连路径可通，输出 pong from 10.77.0.4 via p2p(1.2.3.4:5678) in 8ms；
 # 否则输出 via relay 的中继基准 RTT。
 
 # 3) peers：全部在线 peer 的路径一览
-vrndisd peers --server 203.0.113.1:7777 --psk yourpsk
+vrndisd peers
 # 10.77.0.2 (host)   via p2p(...)  8ms
 # 10.77.0.5 (phone)  via relay     42ms
 ```
