@@ -36,17 +36,18 @@ import (
 )
 
 var (
-	wintunDLL               = syscall.NewLazyDLL("wintun.dll")
-	procWintunCreateAdapter = wintunDLL.NewProc("WintunCreateAdapter")
-	procWintunOpenAdapter   = wintunDLL.NewProc("WintunOpenAdapter")
-	procWintunCloseAdapter  = wintunDLL.NewProc("WintunCloseAdapter")
-	procWintunStartSession  = wintunDLL.NewProc("WintunStartSession")
-	procWintunEndSession    = wintunDLL.NewProc("WintunEndSession")
-	procWintunGetReadWait   = wintunDLL.NewProc("WintunGetReadWaitEvent")
-	procWintunReceivePacket = wintunDLL.NewProc("WintunReceivePacket")
-	procWintunReleasePacket = wintunDLL.NewProc("WintunReleaseReceivePacket")
-	procWintunAllocSend     = wintunDLL.NewProc("WintunAllocateSendPacket")
-	procWintunSendPacket    = wintunDLL.NewProc("WintunSendPacket")
+	// wintun proc 由 ensureWintun 显式绑定（见 wintun_embed_windows.go），
+	// dll 内嵌进二进制，运行时释放并加载，部署为单文件。
+	procWintunCreateAdapter *syscall.Proc
+	procWintunOpenAdapter   *syscall.Proc
+	procWintunCloseAdapter  *syscall.Proc
+	procWintunStartSession  *syscall.Proc
+	procWintunEndSession    *syscall.Proc
+	procWintunGetReadWait   *syscall.Proc
+	procWintunReceivePacket *syscall.Proc
+	procWintunReleasePacket *syscall.Proc
+	procWintunAllocSend     *syscall.Proc
+	procWintunSendPacket    *syscall.Proc
 )
 
 const (
@@ -82,8 +83,9 @@ type windowsTAP struct {
 
 // Open 打开（或创建）wintun 适配器；需要管理员权限与 wintun.dll。
 func Open(name string) (Device, error) {
-	if err := wintunDLL.Load(); err != nil {
-		return nil, fmt.Errorf("%w: 加载 wintun.dll 失败（请把 wintun.dll 放到可执行文件同目录）: %v", ErrUnsupported, err)
+	// 内嵌 wintun.dll：自动释放到 exe 同目录（或 temp）并加载，无需随包附带 dll。
+	if err := ensureWintun(); err != nil {
+		return nil, err
 	}
 	namep, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
@@ -258,6 +260,41 @@ func (t *windowsTAP) Up() error {
 		fmt.Sprintf("name=%s", t.name), "admin=enabled").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("netsh enable interface: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// AddDefaultRouteProtected 先把服务器端点钉在物理默认网关上，再安装隧道
+// 默认路由；排除失败直接返回错误，拒绝安装默认路由（Windows 上若隧道
+// 连接被自身默认路由劫持，可能掐断用户的 RDP 会话，故采取保守策略）。
+func (t *windowsTAP) AddDefaultRouteProtected(gateway, exclude net.IP) error {
+	if exclude != nil {
+		if err := t.addExcludeRoute(exclude); err != nil {
+			return fmt.Errorf("排除服务器端点路由失败，拒绝安装默认路由以保护隧道连接: %w", err)
+		}
+	}
+	return t.AddDefaultRoute(gateway)
+}
+
+// addExcludeRoute 用 route add 把 server /32 指向物理默认网关（metric 1）。
+// 物理网关须在隧道默认路由安装之前探测（Get-NetRoute 排序取最低 RouteMetric）。
+func (t *windowsTAP) addExcludeRoute(server net.IP) error {
+	server = server.To4()
+	if server == nil {
+		return fmt.Errorf("排除路由仅支持 IPv4: %v", server)
+	}
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object -Property RouteMetric | Select-Object -First 1 -ExpandProperty NextHop").Output()
+	if err != nil {
+		return fmt.Errorf("Get-NetRoute: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	gw := net.ParseIP(strings.TrimSpace(string(out)))
+	if gw == nil || gw.IsUnspecified() {
+		return fmt.Errorf("无物理默认网关（NextHop=%q），无法排除服务器端点", strings.TrimSpace(string(out)))
+	}
+	out, err = exec.Command("route", "add", server.String(), "mask", "255.255.255.255", gw.String(), "metric", "1").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route add exclude %s: %v (%s)", server, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
