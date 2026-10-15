@@ -191,3 +191,38 @@ ROM 不受影响）；Close() 尝试删除（残留亦安全：表内无路由�
 场景下旧进程退出清理可能晚于新进程的 Remove+Listen，从而删掉新进程刚建好的
 socket 文件（表现为 `vrndisd clients` 报 `no such file`）。改为仅启动时清理
 残留。已连续 restart 两次验证。
+
+## 2026-10-16 补充：管理套接字根因修复（UnixListener 默认 unlink）
+
+**现象**：生产服务器出现"孤儿 listener"——`/proc/net/unix` 显示进程仍
+bind `/run/vrndisd/management.sock`，但文件系统入口消失，`vrndisd clients`
+报 `no such file`；该 socket 路径目录 mtime 与服务启停时间不吻合，排除
+restart 竞态单点解释。
+
+**根因**：Go 标准库 `net.Listen("unix", path)` 返回的 `*UnixListener`，
+其 `Close()` **默认会 unlink socket 文件**（`SetUnlinkOnClose` 默认 true）。
+50cacf1 只移除了代码里显式的 `defer os.Remove`，没堵住 listener Close
+内部的删除路径——任何 Close 与新进程 Listen 的时序错开仍会删掉活动
+socket（旧进程 Stop 的 mgmtLn.Close 即为该路径）。
+
+**修复**（79e812f）：
+- `listenManagement` 创建 listener 后 `SetUnlinkOnClose(false)`：删除
+  语义完全收归"启动时清理残留"，Close 不再动文件；
+- manageLoop 重构为 listen+accept 循环：`acceptManagement` 用
+  `UnixListener.SetDeadline(10s)` 周期唤醒，检测 socket 被外部删除
+  （云 agent / 运维脚本 / tmpfiles 清理）则 Close 旧 listener 重建，
+  重建失败下个 tick 重试，goroutine 不退出；
+- stop 分支仍不删除文件（50cacf1 语义保持）。
+
+**验证**：`TestManagementSocketSelfHeal`（删后自愈）、`...Repeat`（连续
+多次）、`...StopKeepsFile`（Stop 后文件保留）三用例；生产部署后连续
+restart 两次 socket 保持、stop 状态下文件保留。
+
+## 2026-10-16 补充：ping/peers 免输服务器地址
+
+`vrndisd ping <peer>` / `peers` 在 `--server`/`--psk` 未指定时回退读
+已安装服务配置（`service install` 写入的 `/etc/vrndisd.conf` 或
+Windows `%ProgramData%\vrndisd\vrndisd.conf`）：client 配置取
+Server/PSK/Name；本机即服务器时用 `listen` 地址回环直连
+（`0.0.0.0` → `127.0.0.1`）。显式 flag 仍然优先，PSK 命令行覆盖配置。
+本机生产环境实测 `vrndisd peers` / `vrndisd ping 10.77.0.8` 零参数工作。
