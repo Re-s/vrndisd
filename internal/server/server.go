@@ -711,6 +711,24 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.registerPeer(sess, sess.lease.MAC.String(), adv.Candidate)
 			// 找到对端并下发其候选
 			s.distributeCandidates(sess, adv.MAC)
+		case proto.TypeP2PWithdraw:
+			// 客户端撤销本机候选（打洞失败/回退中继）：从 peer 表移除，
+			// 避免死候选残留（后来节点会向已关闭的端点空打洞 30 秒）。
+			if !s.cfg.P2P {
+				break
+			}
+			var w proto.P2PWithdraw
+			if json.Unmarshal(msg.Body, &w) != nil {
+				break
+			}
+			mac := sess.lease.MAC.String()
+			s.unregisterPeer(mac)
+			sess.p2pMu.Lock()
+			sess.p2pCandidate = ""
+			sess.p2pReady = false
+			sess.p2pPeerMAC = ""
+			sess.p2pMu.Unlock()
+			s.logger.Printf("vrndis server: peer %s 撤销候选（回退中继）", mac)
 		case proto.TypeP2PReady:
 			// 客户端通知打洞成功（管理面展示用，不影响数据面）
 			if !s.cfg.P2P {

@@ -28,6 +28,7 @@ const (
 	TypeP2PAdvertise  byte = 9  // 客户端 -> 服务器：上报本机候选（NAT 映射地址）
 	TypeP2PReady      byte = 13 // 客户端 -> 服务器：打洞成功，数据面已切 UDP 直连
 	TypePeerQuery     byte = 14 // 客户端 -> 服务器：查询 peer 候选（ping/status 用）
+	TypeP2PWithdraw   byte = 15 // 客户端 -> 服务器：撤销本机候选（打洞失败/回退中继）
 	TypePeerCandidate byte = 10 // 服务器 -> 客户端：下发对端 MAC + 候选地址
 	// 加密握手消息类型（v3 协议，在 HELLO/ASSIGN 之前协商）
 	TypeCryptoHello byte = 11 // 客户端 -> 服务器：E_KC + 版本号
@@ -78,6 +79,8 @@ func TypeName(t byte) string {
 		return "P2P_ADV"
 	case TypeP2PReady:
 		return "P2P_READY"
+	case TypeP2PWithdraw:
+		return "P2P_WITHDRAW"
 	case TypePeerQuery:
 		return "PEER_QUERY"
 	case TypePeerCandidate:
@@ -196,6 +199,14 @@ type PeerQuery struct {
 type P2PReady struct {
 	Version int    `json:"version"`  // 协议版本，用于兼容
 	PeerMAC string `json:"peer_mac"` // 对端虚拟 MAC
+}
+
+// P2PWithdraw 撤销本机候选（客户端 -> 服务器）。
+// 打洞失败、等待候选超时或回退中继时发送：服务器据此从 peer 表移除该
+// 候选，避免死候选残留导致后来节点向已关闭的端点空打洞。
+type P2PWithdraw struct {
+	Version int    `json:"version"` // 协议版本，用于兼容
+	MAC     string `json:"mac"`     // 本机虚拟 MAC
 }
 
 // P2PAdvertise 客户端向服务器上报本机 NAT 候选（P2P 模式）。

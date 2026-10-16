@@ -94,6 +94,7 @@ type Client struct {
 	peerMAC    net.HardwareAddr // 对端虚拟 MAC
 	peering    bool             // 是否正在打洞中
 	peerCandCh chan *peerInfo   // 服务器下发的对端候选（仅 P2P）
+	p2pActive  bool             // p2pConnect 运行中标记（事件驱动重启去抖）
 
 	stopCh    chan struct{}
 	closeOnce sync.Once
@@ -378,6 +379,61 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) ([]*peerInfo, error) 
 	}
 }
 
+// setP2PActive 标记 p2pConnect 是否在运行（事件驱动重启的去抖依据）。
+func (c *Client) setP2PActive(v bool) {
+	c.p2pMu.Lock()
+	c.p2pActive = v
+	c.p2pMu.Unlock()
+}
+
+// isP2PActive 返回 p2pConnect 是否在运行。
+func (c *Client) isP2PActive() bool {
+	c.p2pMu.Lock()
+	defer c.p2pMu.Unlock()
+	return c.p2pActive
+}
+
+// hasTunnel 返回当前是否存在活跃 P2P 隧道。
+func (c *Client) hasTunnel() bool {
+	c.p2pMu.Lock()
+	tun := c.tunnel
+	c.p2pMu.Unlock()
+	return tun != nil
+}
+
+// withdrawCandidate 通知服务器撤销本机候选。打洞失败/等待超时/回退中继
+// 时调用，避免死候选长期残留在服务器 peer 表（后来节点会向已关闭的端点
+// 空打洞 30 秒）。
+func (c *Client) withdrawCandidate() {
+	conn := c.currentConn()
+	if conn == nil {
+		return
+	}
+	c.assignMu.RLock()
+	mac := c.assign.MAC
+	c.assignMu.RUnlock()
+	if mac == "" {
+		return
+	}
+	body, _ := json.Marshal(proto.P2PWithdraw{
+		Version: proto.ProtocolVersion,
+		MAC:     mac,
+	})
+	_ = c.send(conn, proto.TypeP2PWithdraw, body)
+}
+
+// drainPeerCands 清空 peerCandCh 中积压的陈旧推送。
+func (c *Client) drainPeerCands() {
+	for {
+		select {
+		case <-c.peerCandCh:
+			continue
+		default:
+			return
+		}
+	}
+}
+
 // candidateAddr 返回 P2P 打洞的目标地址。
 // 优先使用显式配置的 --stun-server；否则默认走服务器的公网地址 + 5478：
 // STUN 请求必须经物理网络直接送达，服务器（NAT 外侧）才能看到客户端
@@ -443,6 +499,8 @@ func (c *Client) isPeering() bool {
 // p2pConnect P2P 打洞流程：Discover -> 上报候选 -> 等待对端候选 -> 打洞 -> 建隧道。
 // 失败/超时自动回退 TCP 中继（无需任何动作，devToSock 始终写入 TCP）。
 func (c *Client) p2pConnect() {
+	c.setP2PActive(true)
+	defer c.setP2PActive(false)
 	defer c.wg.Done()
 
 	stun := c.candidateAddr()
@@ -450,6 +508,10 @@ func (c *Client) p2pConnect() {
 		c.logger.Printf("vrndis client: P2P 未配置 STUN 服务器，回退 TCP 中继")
 		return
 	}
+	// 清理上一轮残留：撤销仍旧登记在服务器上的旧候选，并丢弃等待通道里
+	// 积压的陈旧推送，防止新一轮拿到过期端点。
+	c.withdrawCandidate()
+	c.drainPeerCands()
 
 	// 1) 通过 STUN 获取本机 NAT 映射后的公网地址。
 	// ctx 联动 stopCh：Stop 时立即取消 STUN/候选等待/打洞，避免
@@ -490,6 +552,13 @@ func (c *Client) p2pConnect() {
 		_ = c.send(conn, proto.TypeP2PAdvertise, body)
 	}
 
+	// 2.5) 主动拉取当前在线候选：服务器只在新注册时推送，错过的历史候选
+	// 要靠 query 拿回（answerPeerQuery 应答全量候选）。
+	if conn := c.currentConn(); conn != nil {
+		qbody, _ := json.Marshal(proto.PeerQuery{Version: proto.ProtocolVersion})
+		_ = c.send(conn, proto.TypePeerQuery, qbody)
+	}
+
 	// 3) 等待对端候选（带超时），超时则回退
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
@@ -502,6 +571,7 @@ func (c *Client) p2pConnect() {
 	}()
 	peers, err := c.waitForPeerCandidate(ctx2)
 	if err != nil {
+		c.withdrawCandidate()
 		c.logger.Printf("vrndis client: 等待对端候选超时: %v（回退 TCP 中继）", err)
 		return
 	}
@@ -515,10 +585,20 @@ func (c *Client) p2pConnect() {
 	c.p2pMu.Unlock()
 	var cands []*net.UDPAddr
 	for _, p := range peers {
+		// answerPeerQuery 不排除调用方自己的候选，过滤本机端点
+		if p.MAC.String() == selfMAC {
+			continue
+		}
 		cands = append(cands, p.Addr)
+	}
+	if len(cands) == 0 {
+		c.withdrawCandidate()
+		c.logger.Printf("vrndis client: 无对端候选（仅本机），回退 TCP 中继")
+		return
 	}
 	tun, err := p2p.PunchConn(ctx2, stunConn, cands)
 	if err != nil {
+		c.withdrawCandidate()
 		c.clearTunnel()
 		c.logger.Printf("vrndis client: P2P 打洞失败: %v（回退 TCP 中继）", err)
 		return
@@ -814,6 +894,18 @@ func (c *Client) sockToDev(conn net.Conn) {
 						}
 					}
 				}
+			}
+		}
+
+		// 事件驱动重试：p2pConnect 未运行且当前无隧道（如上一轮打洞
+		// 已超时回退）时，新候选到来即重启打洞流程，覆盖"本端先就绪、
+		// 对端后上线"的时序错开场景。
+		if c.cfg.P2P && !c.isP2PActive() && !c.hasTunnel() {
+			select {
+			case <-c.stopCh:
+			default:
+				c.wg.Add(1)
+				go c.p2pConnect()
 			}
 		}
 	}
