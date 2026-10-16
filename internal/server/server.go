@@ -770,7 +770,27 @@ func (s *Server) unregisterPeer(mac string) {
 	s.logger.Printf("vrndis server: 注销 peer %s", mac)
 }
 
+// candidateHost 从 "host:port" 候选串中取出 host 部分。
+func candidateHost(candidate string) string {
+	host, _, err := net.SplitHostPort(candidate)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
 func (s *Server) registerPeer(sess *session, mac, candidate string) {
+	// 拒绝隧道网段候选：客户端 STUN 请求若被路由进隧道，服务器看到的源是
+	// 隧道内网地址（如 10.77.0.6:33395）。该端口只是 STUN 反射的源端口，
+	// 对端本机并未监听；向隧道地址发包只能绕中继且必然丢弃，是挤占全网
+	// 打洞预算的废候选。LAN 地址（192.168.x 等）不在此列——同 NAT 设备
+	// 可借 LAN 候选内网直连，绕开 hairpin 缺失。
+	if host := candidateHost(candidate); host != "" {
+		if ip := net.ParseIP(host); ip != nil && s.pool.Contains(ip) {
+			s.logger.Printf("vrndis server: 拒绝注册隧道地址候选 %s -> %s", mac, candidate)
+			return
+		}
+	}
 	s.peersMu.Lock()
 	s.peers[mac] = &peerInfo{
 		mac:       mac,

@@ -123,6 +123,9 @@ func (p *Pool) Prefix() int { return p.prefix }
 // Gateway 网关地址。
 func (p *Pool) Gateway() net.IP { return append(net.IP(nil), p.gateway...) }
 
+// Contains 报告 ip 是否属于本隧道地址池。
+func (p *Pool) Contains(ip net.IP) bool { return p.network.Contains(ip) }
+
 func nextIP(ip net.IP) net.IP {
 	next := append(net.IP(nil), ip.To4()...)
 	for i := 3; i >= 0; i-- {

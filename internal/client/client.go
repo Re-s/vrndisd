@@ -89,12 +89,14 @@ type Client struct {
 	lastPong   time.Time // 最近一次收到 Pong/Ping 的时间（心跳保活）
 
 	// P2P 运行状态
-	p2pMu      sync.Mutex
-	tunnel     *p2p.Tunnel      // 当前 P2P 隧道（nil = 未打通/已回退）
-	peerMAC    net.HardwareAddr // 对端虚拟 MAC
-	peering    bool             // 是否正在打洞中
-	peerCandCh chan *peerInfo   // 服务器下发的对端候选（仅 P2P）
-	p2pActive  bool             // p2pConnect 运行中标记（事件驱动重启去抖）
+	p2pMu       sync.Mutex
+	tunnel      *p2p.Tunnel      // 当前 P2P 隧道（nil = 未打通/已回退）
+	peerMAC     net.HardwareAddr // 对端虚拟 MAC
+	peering     bool             // 是否正在打洞中
+	peerCandCh  chan *peerInfo   // 服务器下发的对端候选（仅 P2P）
+	p2pActive   bool             // p2pConnect 运行中标记（事件驱动重启去抖）
+	p2pFailures int              // 连续打洞失败轮数（成功清零）
+	p2pBackoff  time.Time        // 退避结束时刻；早于此后不启动新一轮打洞
 
 	stopCh    chan struct{}
 	closeOnce sync.Once
@@ -310,12 +312,7 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	// TCP 中继始终常驻（devToSock 长期驻留），P2P 只是数据面的加速路径；
 	// 打洞失败或隧道断开时自动回退到 TCP 中继，二层不断连。
 	if c.cfg.P2P && c.tunnel == nil {
-		c.setP2PActive(true)
-		c.wg.Add(1)
-		go func() {
-			defer c.setP2PActive(false)
-			c.p2pConnect()
-		}()
+		c.startP2PConnect()
 	}
 
 	c.logger.Printf("vrndis client: 已连接 %s，本机地址 %s/%d 网关 %s",
@@ -403,6 +400,60 @@ func (c *Client) hasTunnel() bool {
 	tun := c.tunnel
 	c.p2pMu.Unlock()
 	return tun != nil
+}
+
+// startP2PConnect 抢占式启动一轮打洞：通过 p2pActive/隧道/退避三重检查后
+// 同步置位 p2pActive（防止广播多条候选推送各起一个 goroutine 的风暴），
+// goroutine 退出时复位。连接路径与事件驱动重试均经此入口。
+func (c *Client) startP2PConnect() {
+	c.p2pMu.Lock()
+	if c.p2pActive || c.tunnel != nil || time.Now().Before(c.p2pBackoff) {
+		c.p2pMu.Unlock()
+		return
+	}
+	c.p2pActive = true
+	c.p2pMu.Unlock()
+	c.wg.Add(1)
+	go func() {
+		defer c.setP2PActive(false)
+		c.p2pConnect()
+	}()
+}
+
+// failP2PRound 记录一次打洞失败：失败计数 +1 并按 1m/2m/4m/5m 退避，
+// 退避到期后自动发起下一轮——不依赖对端事件，保证间歇可达的网络环境
+// （如对端周期性上线）最终能自我恢复。
+func (c *Client) failP2PRound() {
+	c.p2pMu.Lock()
+	c.p2pFailures++
+	delay := time.Minute
+	switch {
+	case c.p2pFailures == 2:
+		delay = 2 * time.Minute
+	case c.p2pFailures == 3:
+		delay = 4 * time.Minute
+	case c.p2pFailures >= 4:
+		delay = 5 * time.Minute
+	}
+	c.p2pBackoff = time.Now().Add(delay)
+	c.p2pMu.Unlock()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		select {
+		case <-c.stopCh:
+		case <-time.After(delay):
+			c.startP2PConnect()
+		}
+	}()
+}
+
+// resetP2PBackoff 打洞成功后清零连续失败计数与退避时间。
+func (c *Client) resetP2PBackoff() {
+	c.p2pMu.Lock()
+	c.p2pFailures = 0
+	c.p2pBackoff = time.Time{}
+	c.p2pMu.Unlock()
 }
 
 // withdrawCandidate 通知服务器撤销本机候选。打洞失败/等待超时/回退中继
@@ -574,6 +625,7 @@ func (c *Client) p2pConnect() {
 	peers, err := c.waitForPeerCandidate(ctx2)
 	if err != nil {
 		c.withdrawCandidate()
+		c.failP2PRound()
 		c.logger.Printf("vrndis client: 等待对端候选超时: %v（回退 TCP 中继）", err)
 		return
 	}
@@ -595,6 +647,7 @@ func (c *Client) p2pConnect() {
 	}
 	if len(cands) == 0 {
 		c.withdrawCandidate()
+		c.failP2PRound()
 		c.logger.Printf("vrndis client: 无对端候选（仅本机），回退 TCP 中继")
 		return
 	}
@@ -602,6 +655,7 @@ func (c *Client) p2pConnect() {
 	if err != nil {
 		c.withdrawCandidate()
 		c.clearTunnel()
+		c.failP2PRound()
 		c.logger.Printf("vrndis client: P2P 打洞失败: %v（回退 TCP 中继）", err)
 		return
 	}
@@ -619,6 +673,7 @@ func (c *Client) p2pConnect() {
 		peerMAC = peers[0].MAC
 	}
 	c.setTunnel(tun, peerMAC)
+	c.resetP2PBackoff()
 	// 通知服务器打洞成功（仅管理面展示用，失败无碍）
 	if conn := c.currentConn(); conn != nil && peerMAC != nil {
 		body, _ := json.Marshal(proto.P2PReady{
@@ -902,19 +957,13 @@ func (c *Client) sockToDev(conn net.Conn) {
 		// 事件驱动重试：p2pConnect 未运行且当前无隧道（如上一轮打洞
 		// 已超时回退）时，新候选到来即重启打洞流程，覆盖"本端先就绪、
 		// 对端后上线"的时序错开场景。
-		if c.cfg.P2P && !c.isP2PActive() && !c.hasTunnel() {
+		if c.cfg.P2P {
 			select {
 			case <-c.stopCh:
 			default:
-				// 同步占位再启动：服务器一次广播会下发多条候选推送，
-				// go 启动到 p2pConnect 内部 setP2PActive(true) 之间存在
-				// 窗口，不同步占位会并为每条推送各起一个打洞 goroutine。
-				c.setP2PActive(true)
-				c.wg.Add(1)
-				go func() {
-					defer c.setP2PActive(false)
-					c.p2pConnect()
-				}()
+				// 退避期内的事件直接丢弃；退避到期后由 failP2PRound
+				// 安排的定时器自动发起下一轮，不依赖对端事件。
+				c.startP2PConnect()
 			}
 		}
 	}
