@@ -310,8 +310,12 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	// TCP 中继始终常驻（devToSock 长期驻留），P2P 只是数据面的加速路径；
 	// 打洞失败或隧道断开时自动回退到 TCP 中继，二层不断连。
 	if c.cfg.P2P && c.tunnel == nil {
+		c.setP2PActive(true)
 		c.wg.Add(1)
-		go c.p2pConnect()
+		go func() {
+			defer c.setP2PActive(false)
+			c.p2pConnect()
+		}()
 	}
 
 	c.logger.Printf("vrndis client: 已连接 %s，本机地址 %s/%d 网关 %s",
@@ -499,8 +503,6 @@ func (c *Client) isPeering() bool {
 // p2pConnect P2P 打洞流程：Discover -> 上报候选 -> 等待对端候选 -> 打洞 -> 建隧道。
 // 失败/超时自动回退 TCP 中继（无需任何动作，devToSock 始终写入 TCP）。
 func (c *Client) p2pConnect() {
-	c.setP2PActive(true)
-	defer c.setP2PActive(false)
 	defer c.wg.Done()
 
 	stun := c.candidateAddr()
@@ -904,8 +906,15 @@ func (c *Client) sockToDev(conn net.Conn) {
 			select {
 			case <-c.stopCh:
 			default:
+				// 同步占位再启动：服务器一次广播会下发多条候选推送，
+				// go 启动到 p2pConnect 内部 setP2PActive(true) 之间存在
+				// 窗口，不同步占位会并为每条推送各起一个打洞 goroutine。
+				c.setP2PActive(true)
 				c.wg.Add(1)
-				go c.p2pConnect()
+				go func() {
+					defer c.setP2PActive(false)
+					c.p2pConnect()
+				}()
 			}
 		}
 	}
