@@ -103,16 +103,21 @@ func (t *androidTAP) SetMAC(mac net.HardwareAddr) error {
 }
 
 // SetIPv4 用 ip 命令配置地址（而非裸 ioctl）：
-//   - `ip addr add <ip>/<prefix> dev <tap>` 分配地址（网卡 up 时内核会自动建 connected 子网路由）。
-//   - 显式 scope link 子网路由放到 Up() 里建立（见 Up），保证网卡已 up。
+//   - 先 `ip -4 addr flush` 清掉网卡全部 IPv4（含旧 ASSIGN 残留的
+//     secondary），再 add 目标地址——全量设置语义，重连换 IP 时旧地址
+//     不堆积（曾实测一张卡积累 8 个地址而内核只用主地址一个）。
+//     -4 只清 IPv4，链路本地 v6 由内核管理不受影响。
+//   - 显式 scope link 子网路由放到 Up() 里建立（见 Up），保证网卡已 up；
+//     子网网段不变，路由跨重连复用（Up 已容错 File exists）。
 func (t *androidTAP) SetIPv4(ip net.IP, prefix int) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return fmt.Errorf("vrndis/tap: not an IPv4 address: %v", ip)
 	}
 	addr := (&net.IPNet{IP: ip4, Mask: net.CIDRMask(prefix, 32)}).String()
+	_ = exec.Command("ip", "-4", "addr", "flush", "dev", t.name).Run()
 	if out, err := exec.Command("ip", "addr", "add", addr, "dev", t.name).CombinedOutput(); err != nil {
-		// 地址已存在（重连复用）属幂等，忽略。
+		// flush 与 add 之间的竞争（极偶发）仍可能 File exists，属幂等结果。
 		if !strings.Contains(string(out), "File exists") {
 			return fmt.Errorf("ip addr add: %v (%s)", err, out)
 		}
