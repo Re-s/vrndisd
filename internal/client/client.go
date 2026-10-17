@@ -423,20 +423,30 @@ func (c *Client) startP2PConnect() {
 // failP2PRound 记录一次打洞失败：失败计数 +1 并按 1m/2m/4m/5m 退避，
 // 退避到期后自动发起下一轮——不依赖对端事件，保证间歇可达的网络环境
 // （如对端周期性上线）最终能自我恢复。
-func (c *Client) failP2PRound() {
+//
+// 日志策略（避免每轮刷屏）：首轮失败输出一次性诊断结论（常见原因），
+// 之后每轮仅输出一行退避摘要（轮数 + 下次尝试间隔 + 当前走中继）。
+func (c *Client) failP2PRound(reason string) {
 	c.p2pMu.Lock()
 	c.p2pFailures++
+	n := c.p2pFailures
 	delay := time.Minute
 	switch {
-	case c.p2pFailures == 2:
+	case n == 2:
 		delay = 2 * time.Minute
-	case c.p2pFailures == 3:
+	case n == 3:
 		delay = 4 * time.Minute
-	case c.p2pFailures >= 4:
+	case n >= 4:
 		delay = 5 * time.Minute
 	}
 	c.p2pBackoff = time.Now().Add(delay)
 	c.p2pMu.Unlock()
+	if n == 1 {
+		c.logger.Printf("vrndis client: P2P 首轮失败: %s（已回退 TCP 中继，二层网络不受影响）", reason)
+		c.logger.Printf("vrndis client: 常见原因: 对端未上线 / 对称 NAT / 本 NAT 无 hairpin（同 NAT 设备互打需 hairpin）")
+	} else {
+		c.logger.Printf("vrndis client: P2P 连续 %d 轮失败（最近: %s），继续走中继，%v 后重试", n, reason, delay.Round(time.Second))
+	}
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -625,8 +635,7 @@ func (c *Client) p2pConnect() {
 	peers, err := c.waitForPeerCandidate(ctx2)
 	if err != nil {
 		c.withdrawCandidate()
-		c.failP2PRound()
-		c.logger.Printf("vrndis client: 等待对端候选超时: %v（回退 TCP 中继）", err)
+		c.failP2PRound(fmt.Sprintf("等待对端候选超时: %v", err))
 		return
 	}
 	for _, p := range peers {
@@ -647,16 +656,14 @@ func (c *Client) p2pConnect() {
 	}
 	if len(cands) == 0 {
 		c.withdrawCandidate()
-		c.failP2PRound()
-		c.logger.Printf("vrndis client: 无对端候选（仅本机），回退 TCP 中继")
+		c.failP2PRound("无对端候选（仅本机）")
 		return
 	}
 	tun, err := p2p.PunchConn(ctx2, stunConn, cands)
 	if err != nil {
 		c.withdrawCandidate()
 		c.clearTunnel()
-		c.failP2PRound()
-		c.logger.Printf("vrndis client: P2P 打洞失败: %v（回退 TCP 中继）", err)
+		c.failP2PRound(fmt.Sprintf("打洞失败: %v", err))
 		return
 	}
 	// 从实际打通的来源回查对端 MAC（候选回退匹配：NAT 后 from 即候选映射地址）

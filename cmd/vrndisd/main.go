@@ -183,6 +183,25 @@ func cmdNetcheck(args []string) error {
 	fmt.Printf("  MappingVariesByDest:    %v\n", res.MappingVariesByDest)
 	fmt.Printf("  NAT 类型:               %s\n", res.NATType)
 	fmt.Printf("  打洞预期:               %s\n", res.HolepunchProspect)
+
+	// 产品化结论：用户关心的是"能不能直连、否则走什么"，以及不确定时该做什么。
+	fmt.Println("结论:")
+	switch {
+	case !res.UDPOK || res.NATType == "udp-blocked":
+		fmt.Println("  预期路径: 服务器中继。本机 UDP 出站被阻断，节点间通信全部经服务器中继。")
+	case res.UDPOK && res.Primary == nil:
+		// 主 STUN 无应答但其他目的地有应答：典型为 --server 端口误填。
+		fmt.Println("  预期路径: 暂按中继。主 STUN 探测无应答（端口可能误填）。")
+		fmt.Println("  请检查: --server 端口应为 STUN 端口（默认 5478）；误填服务器")
+		fmt.Println("         控制端口（TCP）会导致主探测无应答、NAT 判定降级。")
+	case res.NATType == "unknown":
+		fmt.Println("  预期路径: 暂按中继。仅单个目的地应答，无法比对映射。")
+		fmt.Println("  可执行: 加 --extra-stun 指定第三方 STUN 再测，提高判定置信度。")
+	case res.MappingVariesByDest:
+		fmt.Println("  预期路径: 服务器中继。对称/多出口 NAT，直连成功率低，失败自动回退中继。")
+	default:
+		fmt.Println("  预期路径: P2P 优先。NAT 利于直连，无法直连时自动回退服务器中继。")
+	}
 	return nil
 }
 
@@ -383,17 +402,26 @@ func cmdPing(args []string) error {
 		relayRTT = r
 	}
 
+	p2pHit := 0
+	relayHit := 0
 	for i := 0; i < *count; i++ {
 		if rtt, err := discoProbe(*wait, cand.Candidate); err == nil {
+			p2pHit++
 			fmt.Printf("pong from %s via p2p(%s) in %s\n", label, cand.Candidate, fmtDur(rtt))
 			continue
 		}
 		if relayRTT > 0 {
+			relayHit++
 			fmt.Printf("pong from %s via relay in %s（直连无响应，走服务器中继）\n", label, fmtDur(relayRTT))
 		} else {
 			fmt.Printf("pong from %s: 无响应\n", target)
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+	// 诊断提示：全程无直连回包时给一次结论性说明（原因 + 自助命令）
+	if p2pHit == 0 && relayHit > 0 {
+		fmt.Printf("提示: 本轮未收到直连回包（对端未上线 / 对称 NAT / 本 NAT 无 hairpin），")
+		fmt.Printf("当前经服务器中继通信；netcheck 命令可评估本机打洞能力\n")
 	}
 	return nil
 }
@@ -479,8 +507,16 @@ func cmdPeers(args []string) error {
 		}(i, c)
 	}
 	wg.Wait()
+	p2pHit := false
 	for _, r := range results {
+		if strings.Contains(r, "via p2p") {
+			p2pHit = true
+		}
 		fmt.Println(r)
+	}
+	// 诊断提示：全部 peer 无直连回包时给一次结论性说明
+	if !p2pHit && len(results) > 0 {
+		fmt.Println("提示: 本轮无任何直连回包，全部经服务器中继；netcheck 命令可评估本机打洞能力")
 	}
 	return nil
 }
