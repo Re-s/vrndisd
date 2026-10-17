@@ -130,7 +130,7 @@ echo "artifacts:"
 echo ""
 
 echo "packing..."
-tar -czf "./vrndis-go-build-${VERSION_SHORT}.tar.gz" -C "$BUILD_DIR" .
-echo "tarball: ./vrndis-go-build-${VERSION_SHORT}.tar.gz"
+tar -czf "./vrndis-go-build-${gitversion}.tar.gz" -C "$BUILD_DIR" .
+echo "tarball: ./vrndis-go-build-${gitversion}.tar.gz"
 echo ""
 echo "done!"
