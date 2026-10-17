@@ -4,7 +4,8 @@
 
 Windows 上网卡后端使用 [wintun](https://www.wintun.net/)（WireGuard 官方驱动，轻量 NDIS 适配器）：
 
-1. 从官方渠道获取 `wintun.dll`（amd64），放到 `vrndisd.exe` **同目录**；
+1. **无需单独带 dll**：`wintun.dll` 已内嵌进 exe，首次运行自动释放到 exe
+   同目录（或 temp）并加载，单文件部署；
 2. 以**管理员**权限运行（创建网卡需要）；
 3. 首次运行会自动创建 wintun 适配器（名称即 `--tap` 参数，默认 `vrndis-c0`）。
 
@@ -31,8 +32,8 @@ Windows 上网卡后端使用 [wintun](https://www.wintun.net/)（WireGuard 官�
 | 项 | 状态 |
 |---|---|
 | `GOOS=windows go build` 交叉编译 | ✅ 通过 |
-| wintun 数据面收发 | ⏳ 需 Windows 主机运行时验证（wintun.dll 就位后跑 `tests/stress-real.sh` 等价手工步骤） |
-| SCM 服务安装/停止/卸载 | ⏳ 同上（测试矩阵见 docs/robustness-plan.md §6） |
+| wintun 数据面收发 | ✅ 真机验证（2026-10-17，1.0.0+bbbca95）：client 拿到 10.77.0.6，经隧道 ping 通对端 10.77.0.2 / 10.77.0.4（39-90ms，0 丢包），内嵌 wintun.dll 自动释放生效 |
+| SCM 服务安装/停止/卸载 | ✅ 真机验证（同日）：`service install` → sc.exe 查询 STATE: RUNNING；`service status` → installed=true running=true；`uninstall` → sc 查询返回 1060（已删除） |
 
 运行时验证清单（Windows 主机，管理员 PowerShell）：
 ```powershell

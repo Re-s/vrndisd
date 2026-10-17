@@ -123,6 +123,10 @@ func usage() {
   vrndisd peers                              # 同上，列出全部在线 peer
   vrndisd peers --server 1.2.3.4:7777 --psk yourpsk
 
+示例（管理查询，服务器本机执行）：
+  vrndisd status                             # 状态：版本 + 在线客户端数
+  vrndisd clients                            # 在线客户端：地址/名称/MAC/对端/P2P 路径
+
 示例：
   sudo vrndisd server --listen 0.0.0.0:7777
   sudo vrndisd client --server 1.2.3.4:7777

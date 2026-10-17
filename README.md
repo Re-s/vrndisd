@@ -33,7 +33,11 @@ sudo ./vrndisd server --listen 0.0.0.0:7777 --network 10.77.0.0/24 --gateway 10.
 sudo ./vrndisd client --server 服务器IP:7777
 # → [vrndisd] 已连接 ...，本机地址 10.77.0.2/24 网关 10.77.0.1
 
-# 加 --default-route 则全部流量走隧道（VPN 模式）
+# 常用选项（server / client 各自完整列表见 vrndisd server -h / vrndisd client -h）：
+#   --psk yourpsk      可选，控制面加密鉴权（X25519 + AES-256-GCM，客户端须同 psk）
+#   --stun             仅 server：同时启动内置 STUN（P2P 打洞/netcheck 依赖，默认 :5478/:5479）
+#   --p2p              仅 client：P2P 直连（NAT 穿透走 UDP，失败自动回退服务器中继）
+#   --default-route    仅 client：默认路由指向隧道（VPN 模式，全部流量走隧道）
 ```
 
 ### 服务器侧：转发与 NAT（--default-route 走外网的前提）
@@ -93,18 +97,24 @@ vrndisd.exe service uninstall
 配置写入 `--config`（Linux 默认 `/etc/vrndisd.conf`，Windows 默认 `%ProgramData%\vrndisd\vrndisd.conf`），
 JSON 格式可手工编辑后 `service stop && service start` 生效。
 
-### 在线管理功能
+### 在线管理功能（status / clients）
+
+服务器运行时，在本机即可查询（经管理套接字，免输地址；远程主机需把
+`--socket` 指向服务器平台默认路径）：
 
 ```bash
-# 获取在线客户端列表
-# 服务器运行时调用 GetClients() API
+# 服务器运行状态
+vrndisd status
+# 状态: 版本=1.0.0+bbbca95 在线客户端=4
 
-# 踢出指定客户端
-# srv.KickClient("01:02:03:04:05:06")
-
-# 发送管理命令
-# srv.SendCommandToClient("01:02:03:04:05:06", cmd)
-```
+# 在线客户端列表（地址 / 名称 / MAC / 对端 / P2P 路径）
+vrndisd clients
+# 在线客户端列表 (4)：
+#   1. 10.77.0.2 (win-test/02:00:00:00:00:01) -> 198.51.100.10:54404 [p2p: relay]
+#   2. 10.77.0.3 (nuc/02:00:00:00:00:02)     -> 198.51.100.20:40609 [p2p: relay]
+#   3. 10.77.0.4 (x16d-dbg/02:00:00:00:03)   -> 198.51.100.20:23798 [p2p: stun-ok 198.51.100.20:33129（打洞中）]
+#
+# p2p 字段含义：relay=走服务器中继；stun-ok <addr>=已拿到 STUN 映射候选并尝试直连
 
 ### P2P 诊断（netcheck / ping / peers）
 
@@ -130,8 +140,12 @@ vrndisd ping 10.77.0.4 --count 5
 
 # 3) peers：全部在线 peer 的路径一览
 vrndisd peers
-# 10.77.0.2 (host)   via p2p(...)  8ms
-# 10.77.0.5 (phone)  via relay     42ms
+# 在线 peer (3)：
+#   10.77.0.5              via relay  250µs
+#   10.77.0.2 (win-test)   via relay  250µs
+#   10.77.0.4 (x16d-dbg)   via relay  250µs
+# 提示: 本轮无任何直连回包，全部经服务器中继；netcheck 命令可评估本机打洞能力
+# （ping 同理：全程无直连回包时追加一行相同提示）
 ```
 
 实现要点：`internal/netcheck` 用同一 UDP socket 串行向多个 STUN 发 Binding
@@ -142,12 +156,17 @@ ping/peers 经 PeerQuery 拿对端候选后，用 p2p 的 disco 探测帧（prob
 
 ### STUN 服务器（P2P 连接支持）
 
-```bash
-# 构建并运行 STUN 服务器
-./build/build.sh all
+内置 STUN（RFC 3489/5389 Binding），两种用法：
 
-# 确保有 WebSocket 支持，然后运行 STUN 服务器
-./build/bin/stun-server/stun-server --listen :5478
+```bash
+# 1) 随服务器一并启动（推荐，一条命令搞定 netcheck + 打洞）
+sudo ./vrndisd server --listen 0.0.0.0:7777 --stun
+# --stun-listen / --stun-listen-extra 改监听端口（默认 :5478 / :5479；
+# netcheck 依赖同服务器双端口比对映射，两个端口都要对客户端放行 UDP）
+
+# 2) 独立 STUN（不跑隧道服务器）
+sudo ./vrndisd stun-server --listen 0.0.0.0:5478
+# systemd 单元示例见 deploy/stun-server.service
 ```
 
 ## 构建
@@ -165,11 +184,12 @@ ping/peers 经 PeerQuery 拿对端候选后，用 p2p 的 disco 探测帧（prob
 
 ### 构建产物
 
-- `build/bin/amd64/vrndisd` - amd64 版本
-- `build/bin/arm64/vrndisd` - arm64 版本
-- `build/bin/armv6/vrndisd` - armv6 版本
-- `build/bin/armv7/vrndisd` - armv7 版本
-- `build/bin/stun-server/stun-server` - STUN 服务器
+- `build/bin/amd64/vrndisd`      - linux/amd64
+- `build/bin/arm64/vrndisd`      - linux/arm64（含树莓派 3/4 64 位）
+- `build/bin/armv6/vrndisd`      - linux/armv6
+- `build/bin/armv7/vrndisd`      - linux/armv7
+- `build/bin/windows/vrndisd.exe` - windows/amd64（wintun.dll 已内嵌）
+- `build/bin/android-arm64/vrndisd` - android/arm64（Termux + root）
 
 ### Docker 构建
 
@@ -195,6 +215,7 @@ go test ./internal/server/ -v           # 详细输出
 go test ./internal/proto/ -fuzz=FuzzReadMessage -fuzztime=30s   # L4 fuzz
 sudo bash tests/stress-real.sh ./vrndisd   # L5 真实网卡压测
 sudo bash tests/reconnect-loop.sh ./vrndisd 50   # 崩溃恢复
+sudo bash tests/soak.sh ./vrndisd 24h           # 长稳（RSS/连接漂移观测）
 ```
 
 ## 服务工具参考
@@ -221,7 +242,8 @@ Linux 单元特性：`Restart=always`（3s 后拉起）、`TimeoutStopSec=10`（
 
 ```
 vrndis-go/
-├── cmd/vrndisd/            # CLI：server | client | service | service-run | version
+├── cmd/vrndisd/            # CLI：server | client | service | service-run | stun-server
+│                           #       netcheck | ping | peers | status | clients | version
 ├── internal/
 │   ├── proto/              # 线路协议（分帧 + JSON 控制消息，含 fuzz 测试）
 │   ├── ethernet/           # 以太网帧/ARP（含 fuzz 测试）
@@ -233,13 +255,14 @@ vrndis-go/
 │   ├── service/            # 配置文件 + systemd/SCM 服务管理
 │   └── stun/               # STUN 服务器实现（P2P 连接支持）
 ├── build/
-│   ├── build.sh            # 统一构建脚本 (含鸿蒙_PIGO 版本)
+│   ├── build.sh            # 统一交叉构建脚本
 │   ├── Makefile            # Make 构建接口
 │   ├── Dockerfile.arm      # ARM Docker 构建
 │   └── docker-compose.arm.yml
 ├── tests/
 │   ├── stress-real.sh      # 真实压测脚本
-│   └── reconnect-loop.sh   # 崩溃恢复测试
+│   ├── reconnect-loop.sh   # 崩溃恢复测试
+│   └── soak.sh             # 24h 长稳测试
 ├── docs/
 │   ├── robustness-plan.md
 │   └── windows.md
