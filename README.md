@@ -114,8 +114,10 @@ JSON 格式可手工编辑后 `service stop && service start` 生效。
 # 1) netcheck：本机 NAT 环境与 UDP 可达性探测
 vrndisd netcheck --server 203.0.113.1 --extra-stun stun.l.google.com:19302
 # 输出各 STUN 返回的映射地址、MappingVariesByDest（是否 symmetric NAT）、
-# NAT 类型与打洞预期。主/第二 STUN 指向服务器自建 :5478 / :5479，
-# --extra-stun 可选第三方 STUN 作交叉比对。
+# NAT 类型与打洞预期，并附"结论"段直接给出预期路径（P2P 优先 / 服务器中继）
+# 与可执行建议（如建议加 --extra-stun、提示 --server 端口误填）。
+# 主/第二 STUN 指向服务器自建 :5478 / :5479，--extra-stun 可选第三方 STUN
+# 作交叉比对。
 
 # 2) ping：到指定 peer 的路径探测（relay vs p2p + RTT）
 vrndisd ping 10.77.0.4 --count 5
