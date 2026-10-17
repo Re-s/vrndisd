@@ -39,7 +39,7 @@ import (
 	stunserver "vrndis/internal/stun/server"
 )
 
-var Version = "1.1.0"
+var Version = "dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags)

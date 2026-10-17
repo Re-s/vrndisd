@@ -12,7 +12,7 @@ import (
 	"vrndis/internal/stun/server"
 )
 
-var Version = "1.1.0+unknown"
+var Version = "dev"
 
 func main() {
 	listen := flag.String("listen", ":5478", "STUN 监听地址")

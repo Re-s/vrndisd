@@ -27,7 +27,7 @@ import (
 const tapPort = "tap"
 
 // 服务端版本号
-var Version = "1.1.0+unknown"
+var Version = "dev"
 
 // Config 服务器配置。
 type Config struct {

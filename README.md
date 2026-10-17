@@ -105,7 +105,7 @@ JSON 格式可手工编辑后 `service stop && service start` 生效。
 ```bash
 # 服务器运行状态
 vrndisd status
-# 状态: 版本=1.1.0+19405ee 在线客户端=4
+# 状态: 版本=v1.1.0 在线客户端=4
 
 # 在线客户端列表（地址 / 名称 / MAC / 对端 / P2P 路径）
 vrndisd clients
@@ -199,13 +199,15 @@ docker-compose -f build/docker-compose.arm.yml build --pull
 
 ### 构建版本号说明
 
-所有二进制文件都嵌入了 **Git 提交哈希** 版本号，例如：
+版本号**不在源码里硬编码**，只存在于 git tag，构建时由 `git describe` 动态取出
+再经 ldflags 注入二进制（`main.Version` 与 `vrndis/internal/server.Version`）：
 
-```
-vrndisd 1.1.0+19405ee (linux/amd64)
-```
-
-其中 `214215c` 是 Git 提交哈希的简写，便于版本追踪和调试。
+| 构建时机 | 版本号 | 含义 |
+|---|---|---|
+| tag 所在提交 | `vrndisd v1.1.0 (linux/amd64)` | 正式发布版 |
+| tag 之后有新提交 | `v1.1.0-2-g379ded7` | tag 后第 2 个提交，便于追溯到具体代码 |
+| 工作树有未提交改动 | `v1.1.0-dirty` | 不可复现的构建，提示先提交 |
+| 裸 `go build`（无注入） | `vrndisd dev (linux/amd64)` | 开发自建，明确非正式版 |
 
 ## 测试
 

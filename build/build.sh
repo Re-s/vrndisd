@@ -22,7 +22,12 @@ else
 fi
 
 VERSION_IMPORT="main"
-gitversion="1.1.0+${VERSION_SHORT}"
+
+# 版本号只来自 git tag，不在源码里硬编码：
+#   已打 tag：v1.1.0；tag 后又有提交：v1.1.0-2-g379ded7；dirty：追加 -dirty
+#   非 git 工作树（如解包的 tarball）：回退提交短哈希/unknown
+gitversion=$(git describe --tags --always --dirty 2>/dev/null)
+[ -z "$gitversion" ] && gitversion="${VERSION_SHORT:-unknown}"
 
 # ---- target matrix ----
 TARGETS="amd64 arm64 armv6 armv7 windows"
