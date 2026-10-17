@@ -105,7 +105,7 @@ JSON 格式可手工编辑后 `service stop && service start` 生效。
 ```bash
 # 服务器运行状态
 vrndisd status
-# 状态: 版本=1.0.0+bbbca95 在线客户端=4
+# 状态: 版本=1.1.0+19405ee 在线客户端=4
 
 # 在线客户端列表（地址 / 名称 / MAC / 对端 / P2P 路径）
 vrndisd clients
@@ -202,7 +202,7 @@ docker-compose -f build/docker-compose.arm.yml build --pull
 所有二进制文件都嵌入了 **Git 提交哈希** 版本号，例如：
 
 ```
-vrndisd 1.0.0+214215c (linux/amd64)
+vrndisd 1.1.0+19405ee (linux/amd64)
 ```
 
 其中 `214215c` 是 Git 提交哈希的简写，便于版本追踪和调试。

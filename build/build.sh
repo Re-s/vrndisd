@@ -22,7 +22,7 @@ else
 fi
 
 VERSION_IMPORT="main"
-gitversion="1.0.0+${VERSION_SHORT}"
+gitversion="1.1.0+${VERSION_SHORT}"
 
 # ---- target matrix ----
 TARGETS="amd64 arm64 armv6 armv7 windows"
