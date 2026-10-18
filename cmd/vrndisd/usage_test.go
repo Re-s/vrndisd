@@ -92,14 +92,18 @@ func TestVersionCommandPrintsVersion(t *testing.T) {
 	}
 }
 
-// TestVersionFormat - 版本号必须是 semver[+hash] 格式，且源码默认值与注入格式一致。
-// 注: go test 不经过 build.sh 的 -ldflags，Version 恒为源码默认值（无 +hash）；
-// 此测试锁定"格式契约"（MAJOR.MINOR.PATCH[+hash]），防止 build.sh 注入的
-// main.Version 格式与 usage 输出失配（回归：曾只有 bare 1.0.0 无 +hash）。
+// TestVersionFormat - 锁定版本号策略契约：源码默认值 "dev"（裸 go build 的
+// 开发自建标识），正式构建经 build.sh 由 git describe 注入（v1.1.0 /
+// v1.1.0-2-g379ded7 / v1.1.0-dirty）。版本号不在源码里硬编码（回归：曾
+// 写死 1.0.0/1.0.1 且四处默认值不一致）。
 func TestVersionFormat(t *testing.T) {
+	if Version == "dev" {
+		return // 裸 go build：默认开发标识，符合策略
+	}
 	if !semverRe.MatchString(Version) {
-		t.Fatalf("Version=%q 不符合 semver[+hash] 格式", Version)
+		t.Fatalf("Version=%q 不符合 git describe 语义（vSEMVER[-N-gHASH][-dirty]）", Version)
 	}
 }
 
-var semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+(\+[0-9a-zA-Z.-]+)?$`)
+// semverRe 匹配 git describe 产出：v1.1.0、v1.1.0-2-g379ded7、v1.1.0-dirty。
+var semverRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-\d+-g[0-9a-f]+)?(-dirty)?$`)

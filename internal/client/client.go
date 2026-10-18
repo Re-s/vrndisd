@@ -947,6 +947,11 @@ func (c *Client) sockToDev(conn net.Conn) {
 			// 把对端候选投递给 p2pConnect 的 waitForPeerCandidate。
 			var pc proto.PeerCandidate
 			if json.Unmarshal(msg.Body, &pc) == nil {
+				if pc.Candidate == "" {
+					// 在线但未上报候选（relay-only 诊断条目，含全空结束标记）：
+					// 不参与打洞，直接丢弃，避免向 0.0.0.0:0 空打洞。
+					break
+				}
 				mac, err := ethernet.MACFromString(pc.PeerMAC)
 				if err == nil {
 					a, err2 := net.ResolveUDPAddr("udp", pc.Candidate)

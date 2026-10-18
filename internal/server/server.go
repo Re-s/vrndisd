@@ -858,35 +858,51 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 	}
 }
 
-// answerPeerQuery 应答 PeerQuery：按 target（IP/MAC，空=全部）在 peers
-// 表中查找已上报候选的 peer 并逐条回发；无匹配时回一条空 Candidate 便于客户端收尾。
+// answerPeerQuery 应答 PeerQuery：按 target（IP/MAC/name，空=全部）列出
+// 在线设备。与 ping/peers 诊断命令的"看不到设备"根因修复配合：此前只在
+// peers 表中回发"此刻持有候选"的条目，而候选在打洞失败后被撤回退避，
+// 诊断瞬间几乎必落空——peers 永远空而 clients 有设备。
+//
+// 现按 sessions 全量应答：有候选的带上候选地址（供 disco 探测/打洞），
+// 无候选的作为 relay-only 条目下发（PeerMAC 非空、Candidate 为空），
+// 最后回一条全空 Candidate 作为列表结束标记。常驻客户端对空候选的
+// 处理是 ResolveUDPAddr 失败即丢弃（见 client.go TypePeerCandidate 分支），
+// 不参与打洞，兼容无副作用。
 func (s *Server) answerPeerQuery(sess *session, target string) {
+	selfMAC := sess.lease.MAC.String()
+	type peerEntry struct{ mac, ip, name, cand string }
+	s.mu.RLock()
 	s.peersMu.RLock()
-	var matched []*peerInfo
-	for _, p := range s.peers {
-		if p.candidate == "" {
-			continue // 未上报候选（未开 P2P / 打洞未成功）不应答
+	var matched []peerEntry
+	for _, ses := range s.sessions {
+		mac := ses.lease.MAC.String()
+		if mac == selfMAC {
+			continue // 不回发查询者自己
 		}
-		if target == "" || p.ip.String() == target || p.mac == target || p.name == target {
-			matched = append(matched, p)
+		if target != "" && ses.lease.IP.String() != target && mac != target && ses.name != target {
+			continue
 		}
+		cand := ""
+		if p := s.peers[mac]; p != nil {
+			cand = p.candidate
+		}
+		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: ses.name, cand: cand})
 	}
 	s.peersMu.RUnlock()
-	if len(matched) == 0 {
-		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
-			Version: proto.ProtocolVersion,
-		}))
-		return
-	}
-	for _, p := range matched {
+	s.mu.RUnlock()
+	for _, e := range matched {
 		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
 			Version:   proto.ProtocolVersion,
-			PeerMAC:   p.mac,
-			PeerIP:    p.ip.String(),
-			PeerName:  p.name,
-			Candidate: p.candidate,
+			PeerMAC:   e.mac,
+			PeerIP:    e.ip,
+			PeerName:  e.name,
+			Candidate: e.cand,
 		}))
 	}
+	// 列表结束标记（全空）：匹配为空时第一条即此标记，令客户端立即收尾。
+	_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
+		Version: proto.ProtocolVersion,
+	}))
 }
 
 func (s *Server) handleClientFrame(sess *session, frame []byte) {

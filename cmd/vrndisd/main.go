@@ -392,7 +392,11 @@ func cmdPing(args []string) error {
 		return err
 	}
 	if cand.Candidate == "" {
-		fmt.Printf("peer %s：不存在或未上报候选（未开 -p2p / 打洞未活跃）\n", target)
+		if cand.PeerMAC != "" {
+			fmt.Printf("peer %s：在线，经服务器中继（未上报候选：未开 -p2p 或打洞失败已撤回）\n", target)
+		} else {
+			fmt.Printf("peer %s：不存在\n", target)
+		}
 		return nil
 	}
 	label := target
@@ -475,10 +479,10 @@ func cmdPeers(args []string) error {
 		if err := json.Unmarshal(msg.Body, &c); err != nil {
 			continue
 		}
-		if c.Candidate == "" {
-			break // 空应答：列表结束/无 peer
+		if c.Candidate == "" && c.PeerMAC == "" {
+			break // 全空应答：列表结束
 		}
-		cands = append(cands, c)
+		cands = append(cands, c) // Candidate 为空但 PeerMAC 非空：在线 relay-only 设备
 	}
 	if len(cands) == 0 {
 		fmt.Println("无在线 peer（或均未上报 P2P 候选）")
@@ -500,6 +504,11 @@ func cmdPeers(args []string) error {
 			label := c.PeerIP
 			if c.PeerName != "" {
 				label = fmt.Sprintf("%s (%s)", c.PeerIP, c.PeerName)
+			}
+			if c.Candidate == "" {
+				// 在线但未上报候选（未开 -p2p / 打洞失败已撤回）：只能走中继。
+				results[i] = fmt.Sprintf("  %-22s relay-only（未上报候选）", label)
+				return
 			}
 			if rtt, err := discoProbe(*wait, c.Candidate); err == nil {
 				results[i] = fmt.Sprintf("  %-22s via p2p(%s)  %s", label, c.Candidate, fmtDur(rtt))
