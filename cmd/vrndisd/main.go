@@ -582,6 +582,9 @@ func cmdServer(args []string) error {
 	if *psk != "" {
 		cfg.PSK = []byte(*psk)
 	}
+	// P2P 必须在 server.New 前生效：此前赋值在 New 之后，服务器内部存的是
+	// false 副本，CLI 模式的 --p2p 从未真正开启 P2P（配置文件路径没这问题）。
+	cfg.P2P = *p2p
 
 	srv, err := server.New(cfg)
 	if err != nil {
@@ -592,7 +595,6 @@ func cmdServer(args []string) error {
 	}
 	log.Println("vrndisd: RNDIS 服务器已启动")
 
-	cfg.P2P = *p2p
 	stunSrv, stunErr, _ := startStunServer(*stun, *stunListen, *stunListenExtra)
 
 	// 等待退出信号；若 STUN 启动失败（如端口占用），也整体优雅关停。

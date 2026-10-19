@@ -919,6 +919,16 @@ func candidatesFor(receiver, provider *peerInfo) []string {
 	return out
 }
 
+// containsStr 判断字符串切片是否包含某值（无 slices 依赖的最小实现）。
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // pushCandidateToOthers 把新注册的候选推送给其它已在线且已上报候选的 peer。
 func (s *Server) pushCandidateToOthers(sess *session, selfMAC string, selfCands []string) {
 	s.peersMu.RLock()
@@ -995,6 +1005,7 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 // 不参与打洞，兼容无副作用。
 func (s *Server) answerPeerQuery(sess *session, target string) {
 	selfMAC := sess.lease.MAC.String()
+	receiver := s.peers[selfMAC] // 接收方自己的 peer 记录（未上报候选时为 nil，此时保守只回公网候选）
 	type peerEntry struct {
 		mac, ip, name, cand string
 		list                []string
@@ -1013,8 +1024,17 @@ func (s *Server) answerPeerQuery(sess *session, target string) {
 		cand := ""
 		var list []string
 		if p := s.peers[mac]; p != nil {
+			// 与推送/distribute 同一套过滤：内网候选只给同出口 peer。
+			// PeerQuery 由客户端 p2pConnect 拉取历史候选直接喂打洞，
+			// 不过滤会同 push 一样外泄内网地址/制造空打洞。
+			list = candidatesFor(receiver, p)
 			cand = p.candidate
-			list = p.candidates
+			if len(list) > 0 && !containsStr(list, cand) {
+				cand = list[0] // 主候选被过滤时回退到过滤后首条
+			}
+			if len(list) == 0 {
+				cand = "" // 全部候选对该接收方不可见 = 无候选
+			}
 		}
 		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: ses.name, cand: cand, list: list})
 	}

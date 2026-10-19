@@ -620,8 +620,16 @@ func (c *Client) p2pConnect() {
 	if selfMAC == "" {
 		return
 	}
+	// 本机隧道网段（与本机隧道 IP 一并排除，防 TAP 网段地址混入候选）；
+	// Prefix<=0 时跳过（/0 会全量排除所有地址）
+	var tunnelNet *net.IPNet
+	if c.assign.Prefix > 0 {
+		if _, n, err := net.ParseCIDR(selfIP.String() + "/" + strconv.Itoa(c.assign.Prefix)); err == nil {
+			tunnelNet = n
+		}
+	}
 	if uaddr, ok := stunConn.LocalAddr().(*net.UDPAddr); ok {
-		if hosts, herr := p2p.HostCandidates(uaddr.Port, selfIP); herr == nil {
+		if hosts, herr := p2p.HostCandidates(uaddr.Port, selfIP, tunnelNet); herr == nil {
 			advList = append(advList, hosts...)
 		} else {
 			c.logger.Printf("vrndis client: host 候选收集失败: %v", herr)
