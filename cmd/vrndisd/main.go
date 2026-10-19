@@ -113,7 +113,8 @@ func usage() {
   vrndisd stun-server --version
 
 示例（netcheck）：
-  vrndisd netcheck --server 1.2.3.4                      # 服务器双端口探测
+  vrndisd netcheck                                       # 自动用已安装配置连接的服务器探测
+  vrndisd netcheck --server 1.2.3.4                      # 指定服务器双端口探测
   vrndisd netcheck --server 1.2.3.4 --extra-stun stun.l.google.com:19302
 
 示例（ping / peers）：
@@ -145,21 +146,31 @@ func usage() {
 // STUN（及可选第三方 STUN）发送 Binding Request，比对各目的地映射。
 func cmdNetcheck(args []string) error {
 	fs := flag.NewFlagSet("netcheck", flag.ExitOnError)
-	server := fs.String("server", "", "服务器地址 host[:port]（默认端口 5478）")
+	server := fs.String("server", "", "服务器 STUN 地址 host[:port]（默认端口 5478；留空=用已安装配置连接的服务器）")
 	extra := fs.String("extra-stun", "", "可选第三方 STUN host[:port]（跨公网 IP 映射比对）")
 	fs.Parse(args)
-	if *server == "" {
-		return errors.New("--server 必填（服务器 STUN 主地址）")
+	var primary, secondary string
+	if *server != "" {
+		host, port, err := net.SplitHostPort(*server)
+		if err != nil {
+			host, port = *server, "5478"
+		}
+		if port == "" {
+			port = "5478"
+		}
+		primary = net.JoinHostPort(host, port)
+		secondary = net.JoinHostPort(host, "5479")
+	} else {
+		// 缺省用"连接的服务器"：读已安装配置（client 模式取其服务器，
+		// server 模式回环本机）。STUN 端口固定 5478/5479——与客户端
+		// candidateAddr 同一推导：STUN 走服务器 host + 固定端口，
+		// 而非控制端口 7777。
+		p, s, err := netcheckDefaultServer()
+		if err != nil {
+			return err
+		}
+		primary, secondary = p, s
 	}
-	host, port, err := net.SplitHostPort(*server)
-	if err != nil {
-		host, port = *server, "5478"
-	}
-	if port == "" {
-		port = "5478"
-	}
-	primary := net.JoinHostPort(host, port)
-	secondary := net.JoinHostPort(host, "5479")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -206,6 +217,22 @@ func cmdNetcheck(args []string) error {
 		fmt.Println("  预期路径: P2P 优先。NAT 利于直连，无法直连时自动回退服务器中继。")
 	}
 	return nil
+}
+
+// netcheckDefaultServer 从已安装配置解析"连接的服务器"：
+// client 模式取配置的服务器地址，server 模式回环本机；返回 STUN
+// 主/第二探测地址（host + 5478/5479）。端口推导与客户端 candidateAddr
+// 一致：STUN 挂在服务器公网 host 的固定端口，控制端口 7777 不作 STUN。
+func netcheckDefaultServer() (primary, secondary string, err error) {
+	resolved, _, _, err := resolvePeerFlags("", "", "")
+	if err != nil {
+		return "", "", err
+	}
+	host, _, splitErr := net.SplitHostPort(resolved)
+	if splitErr != nil {
+		host = resolved
+	}
+	return net.JoinHostPort(host, "5478"), net.JoinHostPort(host, "5479"), nil
 }
 
 // parseLoose 宽松解析：允许位置参数出现在 flags 之前（如
