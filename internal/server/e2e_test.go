@@ -35,6 +35,7 @@ func newStack(t *testing.T) *stack {
 		Gateway: gateway,
 		TapMAC:  "02:00:00:00:00:00",
 		Device:  srvDev,
+		P2P:     true, // P2P 控制通道默认开启：不影响不发 P2P 消息的测试
 	})
 	if err != nil {
 		t.Fatal(err)

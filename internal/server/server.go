@@ -79,11 +79,13 @@ type ClientInfo struct {
 
 // peerInfo 一个已上线的 P2P 对端（服务器侧视角）。
 type peerInfo struct {
-	mac       string // 虚拟 MAC（同时也是 peers 表键）
-	ip        net.IP
-	name      string
-	candidate string   // "host:port"，该 peer 上报的 NAT 映射地址
-	sess      *session // 推送候选用（复用带锁的 send）
+	mac        string // 虚拟 MAC（同时也是 peers 表键）
+	ip         net.IP
+	name       string
+	candidate  string   // 主候选（首个公网候选），兼容旧客户端的单字段下发
+	candidates []string // 全部候选：srflx / UPnP 映射 / LAN host / 公网 v6
+	egressIP   net.IP   // 该 peer 的公网出口（首个公网 v4 候选的 host）
+	sess       *session // 推送候选用（复用带锁的 send）
 }
 
 // Server 虚拟 RNDIS 服务器。
@@ -124,15 +126,16 @@ type session struct {
 	macKey string
 	name   string
 	// P2P 状态（管理面展示用）
-	p2pCandidate string // STUN 映射候选（"" 表示未上报）
-	p2pReady     bool   // 客户端通知打洞成功
-	p2pPeerMAC   string // 打通的对端虚拟 MAC
-	p2pMu        sync.RWMutex
-	writeMu      sync.Mutex
-	outQ         chan []byte // 有界发送队列：慢消费者只丢自己的帧，不阻塞交换机
-	done         chan struct{}
-	dropped      atomic.Uint64
-	crypto       *crypto.SecureConn // 加密通道（PSK 握手后非 nil）
+	p2pCandidate  string   // 主候选（"" 表示未上报）
+	p2pCandidates []string // 全部候选（多路化：srflx/LAN/v6）
+	p2pReady      bool     // 客户端通知打洞成功
+	p2pPeerMAC    string   // 打通的对端虚拟 MAC
+	p2pMu         sync.RWMutex
+	writeMu       sync.Mutex
+	outQ          chan []byte // 有界发送队列：慢消费者只丢自己的帧，不阻塞交换机
+	done          chan struct{}
+	dropped       atomic.Uint64
+	crypto        *crypto.SecureConn // 加密通道（PSK 握手后非 nil）
 }
 
 func (s *session) send(typ byte, body []byte) error {
@@ -357,7 +360,12 @@ func (s *Server) managementState() proto.ManagementState {
 		case ready:
 			p2p = "p2p-ok -> " + peerMAC
 		case cand != "":
-			p2p = "stun-ok " + cand + "（打洞中）"
+			n := len(sess.p2pCandidates)
+			if n > 1 {
+				p2p = fmt.Sprintf("stun-ok %s（打洞中，%d 候选）", cand, n)
+			} else {
+				p2p = "stun-ok " + cand + "（打洞中）"
+			}
 		default:
 			p2p = "relay"
 		}
@@ -536,7 +544,12 @@ func (s *Server) getManagementClientInfo() []proto.ClientInfo {
 		case ready:
 			p2p = "p2p-ok -> " + peerMAC
 		case cand != "":
-			p2p = "stun-ok " + cand + "（打洞中）"
+			n := len(sess.p2pCandidates)
+			if n > 1 {
+				p2p = fmt.Sprintf("stun-ok %s（打洞中，%d 候选）", cand, n)
+			} else {
+				p2p = "stun-ok " + cand + "（打洞中）"
+			}
 		default:
 			p2p = "relay"
 		}
@@ -705,10 +718,18 @@ func (s *Server) handleConn(conn net.Conn) {
 			if json.Unmarshal(msg.Body, &adv) != nil {
 				break
 			}
-			if adv.MAC == "" || adv.Candidate == "" {
+			if adv.MAC == "" {
 				break
 			}
-			s.registerPeer(sess, sess.lease.MAC.String(), adv.Candidate)
+			// 旧客户端只有单 Candidate 字段
+			list := adv.Candidates
+			if len(list) == 0 {
+				if adv.Candidate == "" {
+					break
+				}
+				list = []string{adv.Candidate}
+			}
+			s.registerPeer(sess, sess.lease.MAC.String(), adv.Candidate, list)
 			// 找到对端并下发其候选
 			s.distributeCandidates(sess, adv.MAC)
 		case proto.TypeP2PWithdraw:
@@ -725,6 +746,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.unregisterPeer(mac)
 			sess.p2pMu.Lock()
 			sess.p2pCandidate = ""
+			sess.p2pCandidates = nil
 			sess.p2pReady = false
 			sess.p2pPeerMAC = ""
 			sess.p2pMu.Unlock()
@@ -779,39 +801,126 @@ func candidateHost(candidate string) string {
 	return host
 }
 
-func (s *Server) registerPeer(sess *session, mac, candidate string) {
+func (s *Server) registerPeer(sess *session, mac, candidate string, candidates []string) {
 	// 拒绝隧道网段候选：客户端 STUN 请求若被路由进隧道，服务器看到的源是
 	// 隧道内网地址（如 10.77.0.6:33395）。该端口只是 STUN 反射的源端口，
 	// 对端本机并未监听；向隧道地址发包只能绕中继且必然丢弃，是挤占全网
 	// 打洞预算的废候选。LAN 地址（192.168.x 等）不在此列——同 NAT 设备
 	// 可借 LAN 候选内网直连，绕开 hairpin 缺失。
-	if host := candidateHost(candidate); host != "" {
-		if ip := net.ParseIP(host); ip != nil && s.pool.Contains(ip) {
-			s.logger.Printf("vrndis server: 拒绝注册隧道地址候选 %s -> %s", mac, candidate)
-			return
+	// 多候选下逐条剔除隧道地址，保留其它有效候选（单条污染不再整体拒绝）。
+	filtered := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if host := candidateHost(c); host != "" {
+			if ip := net.ParseIP(host); ip != nil && s.pool.Contains(ip) {
+				s.logger.Printf("vrndis server: 拒绝隧道地址候选 %s -> %s", mac, c)
+				continue
+			}
 		}
+		filtered = append(filtered, c)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+	// 主候选 = 首个公网候选（兼容旧客户端单字段下发），无公网候选时回退首个。
+	primary := ""
+	for _, c := range filtered {
+		if isPublicCandidate(c) {
+			primary = c
+			break
+		}
+	}
+	if primary == "" {
+		primary = filtered[0]
 	}
 	s.peersMu.Lock()
 	s.peers[mac] = &peerInfo{
-		mac:       mac,
-		ip:        sess.lease.IP,
-		name:      sess.name,
-		candidate: candidate,
-		sess:      sess,
+		mac:        mac,
+		ip:         sess.lease.IP,
+		name:       sess.name,
+		candidate:  primary,
+		candidates: filtered,
+		egressIP:   candidateEgress(filtered),
+		sess:       sess,
 	}
 	sess.p2pMu.Lock()
-	sess.p2pCandidate = candidate
+	sess.p2pCandidate = primary
+	sess.p2pCandidates = filtered
 	sess.p2pMu.Unlock()
 	s.peersMu.Unlock()
-	s.logger.Printf("vrndis server: 候选注册 %s -> %s", mac, candidate)
+	s.logger.Printf("vrndis server: 候选注册 %s -> %v（出口 %v）", mac, filtered, candidateEgress(filtered))
 	// 向其它已上报候选的在线 peer 推送本端新候选。
 	// 客户端两端上线时序错开时，只有此处推送才能让对端在打洞窗口内
 	// 拿到本端候选（distributeCandidates 只在新 session 上线时下发）。
-	s.pushCandidateToOthers(sess, mac, candidate)
+	s.pushCandidateToOthers(sess, mac, filtered)
+}
+
+// isPublicCandidate 判断候选是否公网可路由（跨 NAT 下发安全）：
+// 公网 v4 或 global v6（非 ULA/link-local/loopback）。私网 v4 与 ULA v6
+// 只能作为同 NAT 内网直连候选，不得下发给不同出口的 peer
+// （防空打洞 + 防内网地址外泄给陌生人）。
+// 注意：Go std 的 IsPrivate 不含 CGNAT 100.64/10（RFC6598），需单独排除。
+func isPublicCandidate(c string) bool {
+	host, _, err := net.SplitHostPort(c)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if ip.To4() != nil && isCGNAT(ip) {
+		return false
+	}
+	return !ip.IsPrivate() // RFC1918(v4) 与 ULA(fc00::/7, v6)
+}
+
+// isCGNAT 判断 IPv4 是否落在 RFC6598 运营商级 NAT 网段 100.64.0.0/10。
+func isCGNAT(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127
+	}
+	return false
+}
+
+// candidateEgress 取候选列表的公网出口 IP（首个公网 v4 候选的 host）。
+// 用于内网候选下发过滤：同出口的 peer 才互发 LAN 候选。
+func candidateEgress(cands []string) net.IP {
+	for _, c := range cands {
+		host, _, err := net.SplitHostPort(c)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			continue
+		}
+		if v4 := ip.To4(); v4 != nil && !v4.IsPrivate() && !v4.IsLoopback() && !v4.IsLinkLocalUnicast() && !isCGNAT(v4) {
+			return v4
+		}
+	}
+	return nil
+}
+
+// candidatesFor 按接收方过滤提供者的候选后返回：
+//   - 公网候选：全量下发（对端并发尝试，先通者胜）
+//   - 内网候选（私网 v4/ULA v6 host 候选）：仅当接收方与提供者同公网出口
+//     （同 NAT/LAN）时下发。无公网候选的一方无法判定亲缘，保守不下发。
+func candidatesFor(receiver, provider *peerInfo) []string {
+	out := make([]string, 0, len(provider.candidates))
+	for _, c := range provider.candidates {
+		if isPublicCandidate(c) {
+			out = append(out, c)
+			continue
+		}
+		if provider.egressIP != nil && receiver.egressIP != nil && receiver.egressIP.Equal(provider.egressIP) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // pushCandidateToOthers 把新注册的候选推送给其它已在线且已上报候选的 peer。
-func (s *Server) pushCandidateToOthers(sess *session, selfMAC, candidate string) {
+func (s *Server) pushCandidateToOthers(sess *session, selfMAC string, selfCands []string) {
 	s.peersMu.RLock()
 	self := s.peers[selfMAC]
 	others := make([]*peerInfo, 0, len(s.peers))
@@ -825,14 +934,19 @@ func (s *Server) pushCandidateToOthers(sess *session, selfMAC, candidate string)
 		return
 	}
 	for _, p := range others {
+		list := candidatesFor(p, self)
+		if len(list) == 0 {
+			continue
+		}
 		_ = p.sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
-			Version:   proto.ProtocolVersion,
-			PeerMAC:   selfMAC,
-			PeerIP:    self.ip.String(),
-			PeerName:  self.name,
-			Candidate: candidate,
+			Version:    proto.ProtocolVersion,
+			PeerMAC:    selfMAC,
+			PeerIP:     self.ip.String(),
+			PeerName:   self.name,
+			Candidate:  list[0],
+			Candidates: list,
 		}))
-		s.logger.Printf("vrndis server: 向 %s 推送新候选 %s -> %s", p.mac, selfMAC, candidate)
+		s.logger.Printf("vrndis server: 向 %s 推送新候选 %s -> %v", p.mac, selfMAC, list)
 	}
 }
 
@@ -847,14 +961,25 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 		}
 	}
 	s.peersMu.RUnlock()
+	receiver := s.peers[selfMAC]
+	if receiver == nil {
+		// 接收方自己尚未注册候选（本函数由刚上报者触发，理论不至此），
+		// 只下发公网候选，避免把对端内网地址泄露给未知出口。
+		receiver = &peerInfo{}
+	}
 
 	for _, p := range peers {
+		list := candidatesFor(receiver, p)
+		if len(list) == 0 {
+			continue
+		}
 		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
-			Version:   proto.ProtocolVersion,
-			PeerMAC:   p.mac,
-			Candidate: p.candidate,
+			Version:    proto.ProtocolVersion,
+			PeerMAC:    p.mac,
+			Candidate:  list[0],
+			Candidates: list,
 		}))
-		s.logger.Printf("vrndis server: 向 %s 下发对端 %s 候选 %s", selfMAC, p.mac, p.candidate)
+		s.logger.Printf("vrndis server: 向 %s 下发对端 %s 候选 %v", selfMAC, p.mac, list)
 	}
 }
 
@@ -870,7 +995,10 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 // 不参与打洞，兼容无副作用。
 func (s *Server) answerPeerQuery(sess *session, target string) {
 	selfMAC := sess.lease.MAC.String()
-	type peerEntry struct{ mac, ip, name, cand string }
+	type peerEntry struct {
+		mac, ip, name, cand string
+		list                []string
+	}
 	s.mu.RLock()
 	s.peersMu.RLock()
 	var matched []peerEntry
@@ -883,20 +1011,23 @@ func (s *Server) answerPeerQuery(sess *session, target string) {
 			continue
 		}
 		cand := ""
+		var list []string
 		if p := s.peers[mac]; p != nil {
 			cand = p.candidate
+			list = p.candidates
 		}
-		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: ses.name, cand: cand})
+		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: ses.name, cand: cand, list: list})
 	}
 	s.peersMu.RUnlock()
 	s.mu.RUnlock()
 	for _, e := range matched {
 		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
-			Version:   proto.ProtocolVersion,
-			PeerMAC:   e.mac,
-			PeerIP:    e.ip,
-			PeerName:  e.name,
-			Candidate: e.cand,
+			Version:    proto.ProtocolVersion,
+			PeerMAC:    e.mac,
+			PeerIP:     e.ip,
+			PeerName:   e.name,
+			Candidate:  e.cand,
+			Candidates: e.list,
 		}))
 	}
 	// 列表结束标记（全空）：匹配为空时第一条即此标记，令客户端立即收尾。

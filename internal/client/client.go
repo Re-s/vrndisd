@@ -327,10 +327,11 @@ func (c *Client) Assignment() *proto.Assignment {
 	return c.assign
 }
 
-// peerInfo 一次收到的对端候选信息。
+// peerInfo 一次收到的对端候选信息。同一对端可携带多个候选地址
+// （srflx / UPnP 映射 / LAN host / IPv6），按 MAC 聚合后并发打洞。
 type peerInfo struct {
-	MAC  net.HardwareAddr
-	Addr *net.UDPAddr
+	MAC   net.HardwareAddr
+	Addrs []*net.UDPAddr
 }
 
 // waitForPeerCandidate 阻塞等待服务器下发 TypePeerCandidate 消息，并在
@@ -364,14 +365,20 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) ([]*peerInfo, error) 
 		case <-c.stopCh:
 			return nil, errors.New("vrndis/client: 客户端已停止")
 		case pi := <-c.peerCandCh:
-			dup := false
+			if len(pi.Addrs) == 0 {
+				continue
+			}
+			merged := false
 			for _, e := range out {
 				if bytes.Equal(e.MAC, pi.MAC) {
-					dup = true
+					// 同一 peer 的多条候选（srflx/LAN/v6）合并到一起，
+					// 供打洞阶段并发尝试。丢弃会损失内网直连候选。
+					e.Addrs = append(e.Addrs, pi.Addrs...)
+					merged = true
 					break
 				}
 			}
-			if !dup {
+			if !merged {
 				out = append(out, pi)
 			}
 		case <-timer:
@@ -595,22 +602,51 @@ func (c *Client) p2pConnect() {
 		c.logger.Printf("vrndis client: STUN Discover 失败: %v（回退 TCP 中继）", err)
 		return
 	}
-	c.logger.Printf("vrndis client: 本地候选 %v", localAddr)
+	srflx := net.JoinHostPort(localAddr.IP.String(), strconv.Itoa(localAddr.Port))
+	c.logger.Printf("vrndis client: 本地候选 %v", srflx)
 
-	// 2) 上报本机候选到服务器
+	// 2) 收集本机全部候选并上报。
+	// 候选共用 STUN Discover 的同一 socket（srflx 端口即打洞端口）：
+	//   - Candidate（srflx 公网映射）：兼容旧服务器的单候选协议
+	//   - host 候选：本机 LAN 私网 v4 + 公网 v6，同 NAT 设备可内网直连，
+	//     绕开本 NAT 无 hairpin 的物理死路。
+	// 候选端口必须严格等于 socket 本地端口（PunchConn 复用此 socket），
+	// 否则候选指向无人监听的端点。
+	advList := []string{srflx}
 	c.assignMu.RLock()
 	selfMAC := c.assign.MAC
+	selfIP := net.ParseIP(c.assign.IP)
 	c.assignMu.RUnlock()
 	if selfMAC == "" {
 		return
+	}
+	if uaddr, ok := stunConn.LocalAddr().(*net.UDPAddr); ok {
+		if hosts, herr := p2p.HostCandidates(uaddr.Port, selfIP); herr == nil {
+			advList = append(advList, hosts...)
+		} else {
+			c.logger.Printf("vrndis client: host 候选收集失败: %v", herr)
+		}
+	}
+	// 2.5) 网关端口映射（UPnP IGD / NAT-PMP）：为对称 NAT 争取一个固定
+	// 外部端口的显式 full-cone 映射。映射 host 复用 srflx 公网 IP（网关
+	// WAN 地址；多出口环境小概率失配，作为多候选之一失败无害）。
+	// 失败静默：无 UPnP 的网络照常纯 STUN 打洞，不产生额外候选。
+	if uaddr, ok := stunConn.LocalAddr().(*net.UDPAddr); ok {
+		if extPort := p2p.MapPort(uaddr.Port, c.logger); extPort != 0 {
+			advList = append(advList, net.JoinHostPort(localAddr.IP.String(), strconv.Itoa(extPort)))
+		}
+	}
+	if extra := len(advList) - 1; extra > 0 {
+		c.logger.Printf("vrndis client: 候选多路化: srflx=%s, %d 个额外候选 %v", srflx, extra, advList[1:])
 	}
 
 	conn := c.currentConn()
 	if conn != nil {
 		body, _ := json.Marshal(proto.P2PAdvertise{
-			Version:   proto.ProtocolVersion,
-			MAC:       selfMAC,
-			Candidate: net.JoinHostPort(localAddr.IP.String(), strconv.Itoa(localAddr.Port)),
+			Version:    proto.ProtocolVersion,
+			MAC:        selfMAC,
+			Candidate:  srflx,
+			Candidates: advList,
 		})
 		_ = c.send(conn, proto.TypeP2PAdvertise, body)
 	}
@@ -639,7 +675,7 @@ func (c *Client) p2pConnect() {
 		return
 	}
 	for _, p := range peers {
-		c.logger.Printf("vrndis client: 收到对端 %s 候选 %v", p.MAC, p.Addr.String())
+		c.logger.Printf("vrndis client: 收到对端 %s 候选 %v", p.MAC, p.Addrs)
 	}
 
 	// 4) 打洞
@@ -647,12 +683,19 @@ func (c *Client) p2pConnect() {
 	c.peering = true
 	c.p2pMu.Unlock()
 	var cands []*net.UDPAddr
+	seen := map[string]bool{}
 	for _, p := range peers {
 		// answerPeerQuery 不排除调用方自己的候选，过滤本机端点
 		if p.MAC.String() == selfMAC {
 			continue
 		}
-		cands = append(cands, p.Addr)
+		for _, a := range p.Addrs {
+			if a == nil || a.Port == 0 || seen[a.String()] {
+				continue // 端口 0 是空候选遗存（ResolveUDPAddr("") 不报错）
+			}
+			seen[a.String()] = true
+			cands = append(cands, a)
+		}
 	}
 	if len(cands) == 0 {
 		c.withdrawCandidate()
@@ -670,8 +713,13 @@ func (c *Client) p2pConnect() {
 	var peerMAC net.HardwareAddr
 	if tun.Peer() != nil {
 		for _, p := range peers {
-			if p.Addr.String() == tun.Peer().String() {
-				peerMAC = p.MAC
+			for _, a := range p.Addrs {
+				if a != nil && a.String() == tun.Peer().String() {
+					peerMAC = p.MAC
+					break
+				}
+			}
+			if peerMAC != nil {
 				break
 			}
 		}
@@ -947,20 +995,34 @@ func (c *Client) sockToDev(conn net.Conn) {
 			// 把对端候选投递给 p2pConnect 的 waitForPeerCandidate。
 			var pc proto.PeerCandidate
 			if json.Unmarshal(msg.Body, &pc) == nil {
-				if pc.Candidate == "" {
-					// 在线但未上报候选（relay-only 诊断条目，含全空结束标记）：
-					// 不参与打洞，直接丢弃，避免向 0.0.0.0:0 空打洞。
-					break
+				// 多候选优先；旧服务器只填单 Candidate 时回退
+				list := pc.Candidates
+				if len(list) == 0 {
+					if pc.Candidate == "" {
+						// 在线但未上报候选（relay-only 诊断条目，含全空结束标记）：
+						// 不参与打洞，直接丢弃，避免向 0.0.0.0:0 空打洞。
+						break
+					}
+					list = []string{pc.Candidate}
 				}
 				mac, err := ethernet.MACFromString(pc.PeerMAC)
-				if err == nil {
-					a, err2 := net.ResolveUDPAddr("udp", pc.Candidate)
-					if err2 == nil {
-						select {
-						case c.peerCandCh <- &peerInfo{MAC: mac, Addr: a}:
-						default:
-							c.logger.Printf("vrndis client: peer 候选通道满，丢弃")
-						}
+				if err != nil {
+					break
+				}
+				var addrs []*net.UDPAddr
+				for _, cs := range list {
+					// 坑：ResolveUDPAddr("udp","") 返回 :0 且 err==nil，
+					// 空候选会变 0.0.0.0:0 废候选，必须按端口 0 过滤。
+					a, err2 := net.ResolveUDPAddr("udp", cs)
+					if err2 == nil && a != nil && a.Port != 0 {
+						addrs = append(addrs, a)
+					}
+				}
+				if len(addrs) > 0 {
+					select {
+					case c.peerCandCh <- &peerInfo{MAC: mac, Addrs: addrs}:
+					default:
+						c.logger.Printf("vrndis client: peer 候选通道满，丢弃")
 					}
 				}
 			}

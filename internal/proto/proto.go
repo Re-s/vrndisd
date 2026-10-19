@@ -210,17 +210,30 @@ type P2PWithdraw struct {
 }
 
 // P2PAdvertise 客户端向服务器上报本机 NAT 候选（P2P 模式）。
+//
+// 候选多路化（提升网状直连成功率）：
+//   - Candidate：srflx 主候选（STUN 公网映射），兼容旧服务器
+//   - Candidates：全部候选，顺序为 srflx、UPnP/NAT-PMP 映射、LAN host（v4 私网）、
+//     公网 IPv6。服务器按接收方与提供者的关系过滤后下发（内网候选只给
+//     同出口 peer），客户端并发向全部候选打洞，先通者胜。
+//
+// 兼容：旧服务器只读 Candidate（行为同单候选时代）；旧客户端忽略 Candidates。
 type P2PAdvertise struct {
-	Version   int    `json:"version"`   // 协议版本，用于兼容
-	MAC       string `json:"mac"`       // 本机虚拟 MAC
-	Candidate string `json:"candidate"` // "host:port"，NAT 映射后的公网地址
+	Version    int      `json:"version"`              // 协议版本，用于兼容
+	MAC        string   `json:"mac"`                  // 本机虚拟 MAC
+	Candidate  string   `json:"candidate"`            // "host:port"，NAT 映射后的公网主候选（兼容）
+	Candidates []string `json:"candidates,omitempty"` // 全部候选（含主候选）
 }
 
 // PeerCandidate 服务器向客户端下发对端信息（含对端 MAC + 候选地址）。
+//
+// Candidates 为对端全部候选（经服务器按本机与对端的网络关系过滤），
+// 旧客户端只读 Candidate（对端首个公网候选），新客户端应优先用 Candidates。
 type PeerCandidate struct {
-	Version   int    `json:"version"`
-	PeerMAC   string `json:"peer_mac"`  // 对端虚拟 MAC
-	PeerIP    string `json:"peer_ip"`   // 对端虚拟 IP（诊断展示用）
-	PeerName  string `json:"peer_name"` // 对端名称（诊断展示用）
-	Candidate string `json:"candidate"` // 对端 "host:port"
+	Version    int      `json:"version"`
+	PeerMAC    string   `json:"peer_mac"`             // 对端虚拟 MAC
+	PeerIP     string   `json:"peer_ip"`              // 对端虚拟 IP（诊断展示用）
+	PeerName   string   `json:"peer_name"`            // 对端名称（诊断展示用）
+	Candidate  string   `json:"candidate"`            // 对端 "host:port"（兼容：首个公网候选）
+	Candidates []string `json:"candidates,omitempty"` // 对端全部候选
 }

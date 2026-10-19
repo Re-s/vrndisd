@@ -112,9 +112,10 @@ func (s *fakeP2PServer) handleConn(conn net.Conn) {
 		s.mu.Lock()
 		// 复制一份，避免 Go 循环变量地址复用导致所有条目指向同一地址
 		advCopy := proto.P2PAdvertise{
-			Version:   adv.Version,
-			MAC:       adv.MAC,
-			Candidate: adv.Candidate,
+			Version:    adv.Version,
+			MAC:        adv.MAC,
+			Candidate:  adv.Candidate,
+			Candidates: adv.Candidates,
 		}
 		s.adv[adv.MAC] = &advCopy
 		s.conns[adv.MAC] = conn
@@ -123,11 +124,7 @@ func (s *fakeP2PServer) handleConn(conn net.Conn) {
 			if existingMAC == adv.MAC || existingConn == nil {
 				continue
 			}
-			_ = proto.WriteMessage(existingConn, proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
-				Version:   proto.ProtocolVersion,
-				PeerMAC:   adv.MAC,
-				Candidate: adv.Candidate,
-			}))
+			_ = proto.WriteMessage(existingConn, proto.TypePeerCandidate, mustJSON(peerCandidateMsg(&adv, "")))
 		}
 		s.distribute()
 		s.mu.Unlock()
@@ -146,11 +143,7 @@ func (s *fakeP2PServer) distribute() {
 			if peerMAC == mac {
 				continue
 			}
-			_ = proto.WriteMessage(conn, proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
-				Version:   proto.ProtocolVersion,
-				PeerMAC:   peerMAC,
-				Candidate: peerAdv.Candidate,
-			}))
+			_ = proto.WriteMessage(conn, proto.TypePeerCandidate, mustJSON(peerCandidateMsg(peerAdv, mac)))
 		}
 	}
 }
@@ -161,6 +154,24 @@ func (s *fakeP2PServer) Stop() {
 	s.stopped.Do(func() { close(s.done); s.ln.Close() })
 	// 不阻塞等待 wg：t.Fatal 会跳过 defer，导致 wg 永远无法完成。
 	// 让 acceptLoop 在 done 关闭后自行退出（通过 SetDeadline 太复杂，依赖 listener 关闭即可）。
+}
+
+// peerCandidateMsg 用上报候选构造下发的 PeerCandidate，并附一个不可达
+// 伪候选（203.0.113.0/24 TEST-NET-1）：多候选客户端必须能在废候选干扰下
+// 选中真正可达的候选。
+func peerCandidateMsg(adv *proto.P2PAdvertise, dstMAC string) proto.PeerCandidate {
+	primary := adv.Candidate
+	cands := append([]string(nil), adv.Candidates...)
+	if len(cands) == 0 {
+		cands = []string{primary}
+	}
+	cands = append(cands, "203.0.113.77:19999")
+	return proto.PeerCandidate{
+		Version:    proto.ProtocolVersion,
+		PeerMAC:    adv.MAC,
+		Candidate:  primary,
+		Candidates: cands,
+	}
 }
 
 // 两个真实客户端 + fake TCP 服务器 + 真实 STUN 服务器 + 回环 UDP 打洞
