@@ -32,6 +32,8 @@ sudo ./vrndisd server --listen 0.0.0.0:7777 --network 10.77.0.0/24 --gateway 10.
 # 客户端
 sudo ./vrndisd client --server 服务器IP:7777
 # → [vrndisd] 已连接 ...，本机地址 10.77.0.2/24 网关 10.77.0.1
+# --server 可省略：回退读已安装配置（service install 写入的 vrndisd.conf），
+# 与 netcheck / ping / peers 一致；已装 server 配置的机器上则回环直连本机。
 
 # 常用选项（server / client 各自完整列表见 vrndisd server -h / vrndisd client -h）：
 #   --psk yourpsk      可选，控制面加密鉴权（X25519 + AES-256-GCM，客户端须同 psk）
@@ -122,6 +124,7 @@ vrndisd clients
 
 ```bash
 # 1) netcheck：本机 NAT 环境与 UDP 可达性探测
+vrndisd netcheck                                     # 自动用已安装配置连接的服务器探测
 vrndisd netcheck --server 203.0.113.1 --extra-stun stun.l.google.com:19302
 # 输出各 STUN 返回的映射地址、MappingVariesByDest（是否 symmetric NAT）、
 # NAT 类型与打洞预期，并附"结论"段直接给出预期路径（P2P 优先 / 服务器中继）

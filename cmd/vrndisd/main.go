@@ -3,7 +3,7 @@
 // 用法：
 //
 //	vrndisd server  [--listen 0.0.0.0:7777] [--network 10.77.0.0/24] [--gateway 10.77.0.1] [--stun] [--stun-listen :5478] ...
-//	vrndisd client  --server HOST:7777 [--tap vrndis-c0] [--name X] [--default-route]
+//	vrndisd client  [--server HOST:7777] [--tap vrndis-c0] [--name X] [--default-route]
 //	vrndisd service install|uninstall|start|stop|status [--mode server|client ...]
 //	vrndisd service-run [--config PATH]
 //	vrndisd stun-server [--listen :5478] [--version]
@@ -652,16 +652,23 @@ func cmdClient(args []string) error {
 	backoff := fs.Duration("backoff", time.Second, "重连退避基数")
 	hbInterval := fs.Duration("heartbeat-interval", 0, "心跳发送间隔（0=默认 10s）")
 	hbTimeout := fs.Duration("heartbeat-timeout", 0, "心跳超时阈值（0=默认 30s）")
-	fs.StringVar(&cfg.Server, "server", "", "服务器地址 host:port（必填）")
+	fs.StringVar(&cfg.Server, "server", "", "服务器地址 host:port（留空时回退已安装配置，同 netcheck/ping/peers）")
 	fs.StringVar(&cfg.TapName, "tap", "vrndis-c0", "本地虚拟网卡名")
-	fs.StringVar(&cfg.Name, "name", "", "客户端名称（默认主机名）")
+	fs.StringVar(&cfg.Name, "name", "", "客户端名称（默认主机名或取自已安装配置）")
 	fs.BoolVar(&cfg.DefaultRoute, "default-route", false, "默认路由指向虚拟网卡")
 	fs.BoolVar(&cfg.P2P, "p2p", false, "开启 P2P 直连（客户端间 NAT 穿透走 UDP，失败回退服务器中继）")
 	fs.StringVar(&cfg.STUNServer, "stun-server", "", "STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时与服务器加密握手）")
 	fs.Parse(args)
+	// --server 留空时回退已安装配置（与 netcheck/ping/peers 一致）：
+	// 客户端模式取其 server 地址，服务器模式回环直连本机；psk/name 一并补齐。
+	// 未安装配置时 resolvePeerFlags 会报错并给出预置方法。
 	if cfg.Server == "" {
-		return fmt.Errorf("缺少 --server")
+		srv, pskStr, nameStr, err := resolvePeerFlags("", *psk, cfg.Name)
+		if err != nil {
+			return err
+		}
+		cfg.Server, *psk, cfg.Name = srv, pskStr, nameStr
 	}
 	cfg.Reconnect = *reconnect
 	cfg.MaxRetries = *maxRetries

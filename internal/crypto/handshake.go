@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 
 	"vrndis/internal/proto"
@@ -130,7 +131,11 @@ func readTyped(conn net.Conn, v any, want byte) (byte, error) {
 		return 0, err
 	}
 	if msg.Type != want {
-		return 0, ErrHandshake
+		// 类型不符通常意味着对端没有发起加密握手：最常见的根因是双方
+		// PSK 配置不一致（一端带 --psk、另一端没带）。把期望/实际类型
+		// 以及可操作提示一并写入错误，省得用户对着 EOF 猜原因。
+		return 0, fmt.Errorf("%w: 期望 %s，收到 %s（对端未启用加密握手？双方 --psk 需一致）",
+			ErrHandshake, proto.TypeName(want), proto.TypeName(msg.Type))
 	}
 	if err := json.Unmarshal(msg.Body, v); err != nil {
 		return 0, err

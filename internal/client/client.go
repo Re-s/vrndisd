@@ -142,7 +142,7 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 		secure, err := crypto.ClientHandshake(conn, c.cfg.PSK, proto.ProtocolVersion)
 		if err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("握手失败: %w", err)
+			return nil, fmt.Errorf("握手失败（服务器可能未启用加密，双方 --psk 需一致）: %w", err)
 		}
 		c.crypto = secure
 		c.logger.Printf("vrndis client: 加密握手成功")
@@ -157,6 +157,11 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	msg, err := proto.ReadMessage(conn)
 	if err != nil {
 		conn.Close()
+		if len(c.cfg.PSK) == 0 {
+			// 本机未加密，对端却在握手阶段就关了连接：最常见的原因是
+			// 服务器配了 --psk 而客户端没带。
+			return nil, fmt.Errorf("read assignment: %w（提示: 本机未配置 --psk，服务器可能要求加密握手）", err)
+		}
 		return nil, fmt.Errorf("read assignment: %w", err)
 	}
 	if c.crypto != nil {
@@ -360,6 +365,9 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) ([]*peerInfo, error) 
 		case <-ctx.Done():
 			if len(out) > 0 {
 				return out, nil
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, errors.New("超时：时限内无对端应答")
 			}
 			return nil, ctx.Err()
 		case <-c.stopCh:
@@ -679,7 +687,7 @@ func (c *Client) p2pConnect() {
 	peers, err := c.waitForPeerCandidate(ctx2)
 	if err != nil {
 		c.withdrawCandidate()
-		c.failP2PRound(fmt.Sprintf("等待对端候选超时: %v", err))
+		c.failP2PRound(fmt.Sprintf("等待对端候选失败: %v", err))
 		return
 	}
 	for _, p := range peers {
@@ -747,10 +755,8 @@ func (c *Client) p2pConnect() {
 	}
 	c.logger.Printf("vrndis client: P2P 隧道已建立 -> %v", tun.Peer())
 
-	// 5) 空闲超时/断线 -> 自动回退 TCP 中继（二层不断连）
-	// 5)  -> :UDP  ->
-	// ,
-	//  AttachIdleMonitor (5s )
+	// 5) 隧道读循环：UDP 隧道 -> 本地网卡；隧道断开（空闲超时或对端关闭）
+	// 时退出，自动回退 TCP 中继（二层不断连）。AttachIdleMonitor 负责空闲检测。
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -763,7 +769,7 @@ func (c *Client) p2pConnect() {
 				if errors.Is(err, tap.ErrBufferFull) {
 					continue
 				}
-				c.logger.Printf("vrndis client: P2P  TAP : %v", err)
+				c.logger.Printf("vrndis client: P2P 隧道写入本地网卡失败: %v", err)
 				return
 			}
 		}
@@ -1131,7 +1137,6 @@ func (c *Client) devToSock() {
 				continue
 			}
 		}
-		c.logger.Printf("vrndis client: devToSock 写入 %d 字节 (crypto=%v)", len(frame), c.crypto != nil)
 		c.writeMu.Lock()
 		err = proto.WriteMessage(conn, proto.TypeData, frame)
 		c.writeMu.Unlock()

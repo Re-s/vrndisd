@@ -36,7 +36,7 @@ func Dial(server, name string, psk []byte, timeout time.Duration) (*Session, *pr
 		secure, err := crypto.ClientHandshake(conn, psk, proto.ProtocolVersion)
 		if err != nil {
 			conn.Close()
-			return nil, nil, fmt.Errorf("加密握手失败: %w", err)
+			return nil, nil, fmt.Errorf("加密握手失败（服务器可能未启用加密，双方 --psk 需一致）: %w", err)
 		}
 		s.sc = secure
 	}
@@ -48,6 +48,9 @@ func Dial(server, name string, psk []byte, timeout time.Duration) (*Session, *pr
 	msg, err := s.RecvDeadline(time.Now().Add(timeout))
 	if err != nil {
 		conn.Close()
+		if len(psk) == 0 {
+			return nil, nil, fmt.Errorf("read assignment: %w（提示: 本机未配置 --psk，服务器可能要求加密握手）", err)
+		}
 		return nil, nil, fmt.Errorf("read assignment: %w", err)
 	}
 	if msg.Type != proto.TypeAssign {
