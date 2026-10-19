@@ -23,7 +23,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -573,10 +572,10 @@ func cmdServer(args []string) error {
 	stunListen := fs.String("stun-listen", ":5478", "STUN 监听地址（--stun 时生效）")
 	stunListenExtra := fs.String("stun-listen-extra", ":5479", "STUN 第二监听地址（netcheck 跨目的地映射比对，检测 symmetric NAT）")
 	psk := fs.String("psk", "", "预共享密钥（非空时要求客户端加密握手）")
-	mgmtSock := fs.String("management-socket", "", "本机管理套接字路径（默认 /run/vrndisd/management.sock，- 禁用）")
+	mgmtListen := fs.String("management-listen", "", "本机管理端口（默认 127.0.0.1:7790，- 禁用）")
 	fs.Parse(args)
-	if *mgmtSock != "" {
-		cfg.ManagementSocket = *mgmtSock
+	if *mgmtListen != "" {
+		cfg.ManagementListen = *mgmtListen
 	}
 	cfg.DNS = splitCSV(fs.Lookup("dns").Value.String())
 	if *psk != "" {
@@ -708,7 +707,7 @@ func cmdService(args []string) error {
 	hbTimeout := fs.Duration("heartbeat-timeout", 0, "client: 心跳超时阈值（0=默认 30s）")
 	stunServer := fs.String("stun-server", "", "client: STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时启用加密握手，server/client 通用）")
-	mgmtSock := fs.String("management-socket", "", "server: 本机管理套接字路径（默认平台默认，- 禁用）")
+	mgmtListen := fs.String("management-listen", "", "server: 本机管理端口（默认 127.0.0.1:7790，- 禁用）")
 	output := fs.String("output", "", "export: 写入的目标文件（默认打印到 stdout）")
 	printCfg := fs.Bool("print-config", false, "install: 仅打印将写入的配置 JSON，不安装服务")
 	fs.Parse(args[1:])
@@ -762,8 +761,8 @@ func cmdService(args []string) error {
 				cfg.STUNServer = *stunServer
 			case "psk":
 				cfg.PSK = *psk
-			case "management-socket":
-				cfg.ManagementSocket = *mgmtSock
+			case "management-listen":
+				cfg.ManagementListen = *mgmtListen
 			}
 		})
 		if err := cfg.Validate(); err != nil {
@@ -1002,15 +1001,15 @@ func defaultConfigPath() string {
 	return service.DefaultConfigPath()
 }
 
-// queryManagement 经本机管理套接字查询服务器实时状态（进程内数据）。
-// 不走客户端 TCP 协议、无需 PSK 握手。path 为空时用平台默认套接字路径。
-func queryManagement(path, cmd string) (*proto.ManagementState, error) {
-	if path == "" {
-		path = defaultManagementSocketPath()
+// queryManagement 经本机管理端口查询服务器实时状态（进程内数据）。
+// 不走客户端 TCP 协议、无需 PSK 握手。addr 为空时用默认 127.0.0.1:7790。
+func queryManagement(addr, cmd string) (*proto.ManagementState, error) {
+	if addr == "" {
+		addr = defaultManagementAddr()
 	}
-	conn, err := net.DialTimeout("unix", path, 3*time.Second)
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("连接管理套接字失败 %s（服务器是否在运行？）: %v", path, err)
+		return nil, fmt.Errorf("连接管理端口失败 %s（服务器是否在运行？）: %v", addr, err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -1025,21 +1024,18 @@ func queryManagement(path, cmd string) (*proto.ManagementState, error) {
 	return &state, nil
 }
 
-// defaultManagementSocketPath 平台默认管理套接字路径（与服务器端一致）。
-func defaultManagementSocketPath() string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("ProgramData"), "vrndisd", "management.sock")
-	}
-	return "/run/vrndisd/management.sock"
+// defaultManagementAddr 默认管理端口地址（与服务器端一致，仅回环）。
+func defaultManagementAddr() string {
+	return "127.0.0.1:7790"
 }
 
 // cmdStatus - 查询服务器状态和版本信息
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
-	socketPath := fs.String("socket", "", "管理套接字路径（默认服务器平台默认路径）")
+	mgmtAddr := fs.String("addr", "", "管理端口地址（默认 127.0.0.1:7790）")
 	fs.Parse(args)
 
-	state, err := queryManagement(*socketPath, "status")
+	state, err := queryManagement(*mgmtAddr, "status")
 	if err != nil {
 		return err
 	}
@@ -1050,10 +1046,10 @@ func cmdStatus(args []string) error {
 // cmdClients - 查询在线客户端列表
 func cmdClients(args []string) error {
 	fs := flag.NewFlagSet("clients", flag.ExitOnError)
-	socketPath := fs.String("socket", "", "管理套接字路径（默认服务器平台默认路径）")
+	mgmtAddr := fs.String("addr", "", "管理端口地址（默认 127.0.0.1:7790）")
 	fs.Parse(args)
 
-	state, err := queryManagement(*socketPath, "clients")
+	state, err := queryManagement(*mgmtAddr, "clients")
 	if err != nil {
 		return err
 	}

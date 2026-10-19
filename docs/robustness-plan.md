@@ -226,3 +226,26 @@ Windows `%ProgramData%\vrndisd\vrndisd.conf`）：client 配置取
 Server/PSK/Name；本机即服务器时用 `listen` 地址回环直连
 （`0.0.0.0` → `127.0.0.1`）。显式 flag 仍然优先，PSK 命令行覆盖配置。
 本机生产环境实测 `vrndisd peers` / `vrndisd ping 10.77.0.8` 零参数工作。
+
+## 2026-10-19 补充：管理面 unix socket → 本地 TCP 端口（127.0.0.1:7790）
+
+**背景**：`vrndisd clients` 偶发 `read unix ->/run/vrndisd/management.sock: i/o
+timeout`——vrndisd 异常重启后 `/run/vrndisd/management.sock` 文件残留/失效，
+旧 listener 绑定的 inode 与磁盘文件入口脱钩。此前的自愈机制（周期 stat 检测
+删除 + 重建）依赖 `managementWatchInterval`（10s）粒度，且 unix socket 的生
+命周期管理（unlink 竞态、SetUnlinkOnClose、tmpfiles 清理）反复出问题。
+
+**改造**：管理面整体改本地 TCP 回环端口，彻底消除文件系统入口这一失效源：
+- `Config.ManagementSocket`（unix 路径）→ `Config.ManagementListen`
+  （`host:port`，默认 `127.0.0.1:7790`，`"-"` 禁用语义保留）
+- `manageLoop`/`listenManagement`/`acceptManagement` 全部改 TCP：
+  删除 `os.Remove`/`SetUnlinkOnClose`/stat 自愈（TCP 无文件残留问题，
+  Accept 错误即重建），manageLoop 保留"监听失败退避重试"骨架
+- CLI：`--management-socket` → `--management-listen`；status/clients 的
+  `--socket` → `--addr`；`queryManagement` 改 `net.DialTimeout("tcp", ...)`
+- 服务配置 JSON 字段 `management_socket` → `management_listen`
+- 测试：`manage_selfheal_test.go`（unix 自愈）淘汰，新增 `manage_tcp_test.go`
+  （回环查询 / `"-"` 禁用 / 端口占用重试 / Stop 关端口）；顺带修了
+  `internal/stun/server` Start 与 Addr 之间的数据竞争（race 抓出）
+
+**验证**：`go test ./...`（16 包）+ `-race` 全绿；生产部署烟测见日志。

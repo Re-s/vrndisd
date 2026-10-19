@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,14 +10,13 @@ import (
 	"vrndis/internal/proto"
 )
 
-// fakeMgmtSocket 启动管理套接字模拟服务器：接受连接后读取 ManagementRequest，
-// 回 state JSON（模拟 server.handleManagementConn 行为）。
-func fakeMgmtSocket(t *testing.T, state proto.ManagementState) string {
+// fakeMgmtServer 启动管理端口模拟服务器：接受连接后读取 ManagementRequest，
+// 回 state JSON（模拟 server.handleManagementConn 行为）。返回监听地址。
+func fakeMgmtServer(t *testing.T, state proto.ManagementState) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "management.sock")
-	ln, err := net.Listen("unix", path)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen unix: %v", err)
+		t.Fatalf("listen tcp: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
 
@@ -37,10 +34,10 @@ func fakeMgmtSocket(t *testing.T, state proto.ManagementState) string {
 		json.NewEncoder(conn).Encode(state)
 	}()
 
-	return path
+	return ln.Addr().String()
 }
 
-// TestQueryManagementClients - clients 查询应正确解析套接字返回的状态快照。
+// TestQueryManagementClients - clients 查询应正确解析管理端口返回的状态快照。
 func TestQueryManagementClients(t *testing.T) {
 	state := proto.ManagementState{
 		Version:   "1.0.0",
@@ -49,9 +46,9 @@ func TestQueryManagementClients(t *testing.T) {
 			{Name: "pc-a", IP: "10.77.0.2", MAC: "02:00:00:00:00:01", Peer: "1.2.3.4:5"},
 		},
 	}
-	path := fakeMgmtSocket(t, state)
+	addr := fakeMgmtServer(t, state)
 
-	got, err := queryManagement(path, "clients")
+	got, err := queryManagement(addr, "clients")
 	if err != nil {
 		t.Fatalf("queryManagement err=%v", err)
 	}
@@ -70,9 +67,9 @@ func TestQueryManagementClients(t *testing.T) {
 // TestQueryManagementEmpty - 无在线客户端时 clients 为空列表，不报错。
 func TestQueryManagementEmpty(t *testing.T) {
 	state := proto.ManagementState{Version: "1.0.0", Clients: []proto.ClientInfo{}}
-	path := fakeMgmtSocket(t, state)
+	addr := fakeMgmtServer(t, state)
 
-	got, err := queryManagement(path, "clients")
+	got, err := queryManagement(addr, "clients")
 	if err != nil {
 		t.Fatalf("queryManagement err=%v", err)
 	}
@@ -81,17 +78,14 @@ func TestQueryManagementEmpty(t *testing.T) {
 	}
 }
 
-// TestQueryManagementNoServer - 套接字不存在时应给出明确错误（而非 EOF/broken pipe）。
-func TestQueryManagementNoServer(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing.sock")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Skip("意外存在")
-	}
-	_, err := queryManagement(path, "clients")
+// TestQueryManagementDefaultAddr - addr 为空时回退默认地址（此处无人监听，
+// 应给出包含默认地址与运行提示的明确错误，而非空指针/EOF）。
+func TestQueryManagementDefaultAddr(t *testing.T) {
+	_, err := queryManagement("", "clients")
 	if err == nil {
 		t.Fatal("应报错")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "服务器是否在运行") {
+	if msg := err.Error(); !strings.Contains(msg, "服务器是否在运行") || !strings.Contains(msg, defaultManagementAddr()) {
 		t.Fatalf("错误提示不明确: %s", msg)
 	}
 }

@@ -9,9 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,9 +42,9 @@ type Config struct {
 	// P2P 是否开启 P2P 直连（默认关闭，纯中继，兼容旧客户端）
 	P2P bool
 
-	// ManagementSocket 本机管理套接字路径（clients/status 命令实时查询，
-	// 不走客户端协议、无需 PSK）。为空时用平台默认路径；"-" 表示禁用。
-	ManagementSocket string
+	// ManagementListen 本机管理监听地址（clients/status 命令实时查询，
+	// 不走客户端协议、无需 PSK）。为空时用默认 127.0.0.1:7790；"-" 表示禁用。
+	ManagementListen string
 }
 
 // DefaultConfig 默认配置。
@@ -97,7 +94,7 @@ type Server struct {
 	tapMAC net.HardwareAddr
 	ln     net.Listener
 	logger *log.Logger
-	mgmtLn net.Listener // 本机管理套接字（clients/status 查询）
+	mgmtLn net.Listener // 本机管理 TCP 监听（clients/status 查询）
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -324,23 +321,20 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
-// defaultManagementSocket 平台默认管理套接字路径。
-func defaultManagementSocket() string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("ProgramData"), "vrndisd", "management.sock")
-	}
-	return "/run/vrndisd/management.sock"
+// defaultManagementListen 平台默认管理监听地址（仅本机回环，避免外网暴露）。
+func defaultManagementListen() string {
+	return "127.0.0.1:7790"
 }
 
-// managementSocketPath 解析管理套接字路径（"-" 禁用返回空）。
-func (s *Server) managementSocketPath() string {
+// managementListenAddr 解析管理监听地址（"-" 禁用返回空）。
+func (s *Server) managementListenAddr() string {
 	switch {
-	case s.cfg.ManagementSocket == "-":
+	case s.cfg.ManagementListen == "-":
 		return ""
-	case s.cfg.ManagementSocket != "":
-		return s.cfg.ManagementSocket
+	case s.cfg.ManagementListen != "":
+		return s.cfg.ManagementListen
 	default:
-		return defaultManagementSocket()
+		return defaultManagementListen()
 	}
 }
 
@@ -385,25 +379,23 @@ func (s *Server) managementState() proto.ManagementState {
 	}
 }
 
-// managementWatchInterval 管理套接字自愈检测间隔。
-// socket 文件被外部删除（云安全 agent / 运维脚本 / tmpfiles 清理）后，
-// 旧 listener 仍 bind 但不可达，按此间隔检测并重建。包级变量便于测试调小。
+// managementWatchInterval 管理端口监听失败后的重试间隔（端口被占用等）。
+// 包级变量便于测试调小。
 var managementWatchInterval = 10 * time.Second
 
-// manageLoop 监听本机管理套接字，响应 clients/status 查询。
+// manageLoop 监听本机管理端口（TCP，仅回环），响应 clients/status 查询。
 // 每个连接读一行 ManagementRequest JSON，回 ManagementState JSON。
-// socket 文件被外部删除时自愈重建（不退出 goroutine，保证持续可查询）。
+// TCP 化消除了 unix socket 文件残留/被外部删除的竞态：Accept 错误即重建。
 func (s *Server) manageLoop() {
 	defer s.wg.Done()
-	path := s.managementSocketPath()
-	if path == "" {
+	addr := s.managementListenAddr()
+	if addr == "" {
 		return
 	}
-	os.MkdirAll(filepath.Dir(path), 0755)
 	for {
-		ln := s.listenManagement(path)
+		ln := s.listenManagement(addr)
 		if ln == nil {
-			// 监听失败（路径占用等）：等待后重试，不退出
+			// 监听失败（端口占用等）：等待后重试，不退出
 			select {
 			case <-s.stopCh:
 				return
@@ -411,45 +403,41 @@ func (s *Server) manageLoop() {
 			}
 			continue
 		}
-		if !s.acceptManagement(ln, path) {
-			return // 收到 stop 信号：退出（不删除 socket 文件）
+		if !s.acceptManagement(ln) {
+			return // 收到 stop 信号：退出
 		}
 	}
 }
 
-// listenManagement 创建（或重建）管理套接字 listener 并记录到 s.mgmtLn。
-// 每次调用先清理残留 socket 文件（systemd restart 竞态由"启动时清理 +
-// 退出不删除"组合避免，见 50cacf1；外部删除后的孤儿由本函数重建）。
-func (s *Server) listenManagement(path string) net.Listener {
-	os.Remove(path) // 清理上次残留
-	ln, err := net.Listen("unix", path)
+// listenManagement 创建（或重建）管理 TCP listener 并记录到 s.mgmtLn。
+func (s *Server) listenManagement(addr string) net.Listener {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		s.logger.Printf("vrndis server: 管理套接字监听失败 %s: %v", path, err)
+		s.logger.Printf("vrndis server: 管理端口监听失败 %s: %v", addr, err)
 		return nil
 	}
-	// UnixListener.Close 默认会 unlink socket 文件：restart 时序中旧进程的
-	// Close 可能晚于新进程的 Listen，从而误删新进程的文件（50cacf1 移除了
-	// 显式 defer Remove 却未堵住此路径，socket 仍然"消失"）。显式关闭该行为，
-	// 删除完全由"启动时清理残留"承担。
-	if ul, ok := ln.(*net.UnixListener); ok {
-		ul.SetUnlinkOnClose(false)
-	}
+	s.mu.Lock()
 	s.mgmtLn = ln
-	s.logger.Printf("vrndis server: 管理套接字 %s", path)
+	s.mu.Unlock()
+	s.logger.Printf("vrndis server: 管理端口 %s", addr)
 	return ln
+}
+
+// ManagementAddr 返回当前管理监听地址（未监听/已停止返回空）。
+func (s *Server) ManagementAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.mgmtLn == nil {
+		return ""
+	}
+	return s.mgmtLn.Addr().String()
 }
 
 // acceptManagement 接受管理查询连接。
 // 返回 false 表示收到 stop 信号（manageLoop 应退出）；
-// 返回 true 表示 listener 不可用（socket 被外部删除或意外关闭），应重建。
-func (s *Server) acceptManagement(ln net.Listener, path string) bool {
-	// unix listener 支持 SetDeadline：周期唤醒检测 socket 文件是否被外部删除。
-	// 非 unix listener（不会发生）退化为阻塞 accept，无自愈。
-	ul, hasDeadline := ln.(*net.UnixListener)
+// 返回 true 表示 listener 不可用（被关闭等），应重建。
+func (s *Server) acceptManagement(ln net.Listener) bool {
 	for {
-		if hasDeadline {
-			_ = ul.SetDeadline(time.Now().Add(managementWatchInterval))
-		}
 		conn, err := ln.Accept()
 		if err == nil {
 			s.handleManagementConn(conn)
@@ -461,16 +449,7 @@ func (s *Server) acceptManagement(ln net.Listener, path string) bool {
 			return false
 		default:
 		}
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			// 自愈检测：listener 仍 bind 但 socket 文件被外部删除
-			if _, serr := os.Stat(path); serr != nil {
-				s.logger.Printf("vrndis server: 管理套接字 %s 被外部删除，重建", path)
-				ln.Close()
-				return true
-			}
-			continue
-		}
-		// 非超时错误（listener 被关闭等）：重建
+		// Accept 错误（listener 被关闭等）：重建
 		return true
 	}
 }

@@ -58,7 +58,9 @@ func (s *Server) Start() error {
 			s.closeAll()
 			return err
 		}
+		s.mu.Lock()
 		s.conns = append(s.conns, conn)
+		s.mu.Unlock()
 		s.logger.Printf("STUN server listening on %s", a)
 	}
 	for _, conn := range s.conns {
