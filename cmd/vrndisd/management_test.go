@@ -78,9 +78,15 @@ func TestQueryManagementEmpty(t *testing.T) {
 	}
 }
 
-// TestQueryManagementDefaultAddr - addr 为空时回退默认地址（此处无人监听，
-// 应给出包含默认地址与运行提示的明确错误，而非空指针/EOF）。
+// TestQueryManagementDefaultAddr - addr 为空时回退默认地址，应给出包含
+// 默认地址与运行提示的明确错误（而非空指针/EOF）。
+// 注意：本机若正运行 vrndisd 服务器（如开发机即生产机），7790 会连通，
+// 此时跳过错误文案校验。
 func TestQueryManagementDefaultAddr(t *testing.T) {
+	if conn, err := net.DialTimeout("tcp", defaultManagementAddr(), 500*time.Millisecond); err == nil {
+		conn.Close()
+		t.Skipf("默认地址 %s 正被占用（本机在跑服务器），跳过错误文案校验", defaultManagementAddr())
+	}
 	_, err := queryManagement("", "clients")
 	if err == nil {
 		t.Fatal("应报错")

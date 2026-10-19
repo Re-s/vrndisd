@@ -115,6 +115,12 @@ type Server struct {
 	framesOut atomic.Uint64 // 发往客户端的帧
 }
 
+// controlWriteTimeout 控制面/管理面同步写的超时上限。
+// 对端半死（接收窗口关闭且无 RST）时 TCP 写会无限阻塞，曾经把
+// handleConn 的消息处理 goroutine 冻结并雪崩至全会话（2026-10-19 事故）。
+// 10s 仍写不出去即判为死连接。
+const controlWriteTimeout = 10 * time.Second
+
 type session struct {
 	id     uint64
 	conn   net.Conn
@@ -135,9 +141,16 @@ type session struct {
 	crypto        *crypto.SecureConn // 加密通道（PSK 握手后非 nil）
 }
 
+// send 同步发送一条消息（写超时 controlWriteTimeout）。调用方通常在
+// 回应该连接自身消息的路径上，阻塞上限即本连接的写超时。
 func (s *session) send(typ byte, body []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	return s.writeMsg(typ, body)
+}
+
+// writeMsg 加密并写出一条消息。调用者必须持有 writeMu。
+func (s *session) writeMsg(typ byte, body []byte) error {
 	if s.crypto != nil {
 		// 信封模式：[type]+body 整体加密，外层统一 TypeData
 		plaintext := append([]byte{typ}, body...)
@@ -145,9 +158,20 @@ func (s *session) send(typ byte, body []byte) error {
 		if err != nil {
 			return err
 		}
-		return proto.WriteMessage(s.conn, proto.TypeData, encrypted)
+		typ, body = proto.TypeData, encrypted
 	}
+	// 每次写前重设：既封顶本次阻塞，又不留残留超时状态
+	_ = s.conn.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
 	return proto.WriteMessage(s.conn, typ, body)
+}
+
+// sendControl 异步发送控制消息（跨连接通知：候选推送等）。
+// 收件人半死时同步写会冻结发件人 handleConn 的消息循环并雪崩，
+// 异步化为各自 writeMu + 写超时，发件人零等待。
+func (s *session) sendControl(typ byte, body []byte) {
+	go func() {
+		_ = s.send(typ, body)
+	}()
 }
 
 func (s *session) enqueueFrame(frame []byte) {
@@ -164,19 +188,7 @@ func (s *session) writer() {
 	for {
 		select {
 		case frame := <-s.outQ:
-			s.writeMu.Lock()
-			outFrame := frame
-			if s.crypto != nil {
-				// 信封模式：[TypeData]+frame 整体加密
-				plaintext := append([]byte{proto.TypeData}, frame...)
-				encrypted, encErr := s.crypto.Encrypt(plaintext)
-				if encErr == nil {
-					outFrame = encrypted
-				}
-			}
-			err := proto.WriteMessage(s.conn, proto.TypeData, outFrame)
-			s.writeMu.Unlock()
-			if err != nil {
+			if err := s.writeMsg(proto.TypeData, frame); err != nil {
 				return
 			}
 		case <-s.done:
@@ -465,7 +477,8 @@ func (s *Server) handleManagementConn(conn net.Conn) {
 	}
 	// 所有命令统一返回完整实时状态快照（clients 命令取 .Clients）。
 	state := s.managementState()
-	json.NewEncoder(conn).Encode(state)
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = json.NewEncoder(conn).Encode(state)
 }
 
 // SessionCount 当前在线客户端数。
@@ -490,11 +503,14 @@ func (s *Server) GetClients() []*ClientInfo {
 	clients := make([]*ClientInfo, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		lease := sess.lease
+		sess.p2pMu.RLock()
+		name := sess.name
+		sess.p2pMu.RUnlock()
 		clients = append(clients, &ClientInfo{
 			IP:        lease.IP,
 			MAC:       lease.MAC,
 			Peer:      sess.peer,
-			Name:      sess.name,
+			Name:      name,
 			LeaseID:   lease.ClientID,
 			Prefix:    lease.Prefix,
 			Gateway:   lease.Gateway,
@@ -660,7 +676,9 @@ func (s *Server) handleConn(conn net.Conn) {
 		case proto.TypeHello:
 			var hello proto.Hello
 			if json.Unmarshal(msg.Body, &hello) == nil {
+				sess.p2pMu.Lock()
 				sess.name = hello.Name
+				sess.p2pMu.Unlock()
 			}
 		case proto.TypeKeepalive:
 			// 心跳，忽略
@@ -927,7 +945,7 @@ func (s *Server) pushCandidateToOthers(sess *session, selfMAC string, selfCands 
 		if len(list) == 0 {
 			continue
 		}
-		_ = p.sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
+		p.sess.sendControl(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
 			Version:    proto.ProtocolVersion,
 			PeerMAC:    selfMAC,
 			PeerIP:     self.ip.String(),
@@ -944,18 +962,18 @@ func (s *Server) pushCandidateToOthers(sess *session, selfMAC string, selfCands 
 func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 	s.peersMu.RLock()
 	peers := make([]*peerInfo, 0, len(s.peers))
+	receiver := s.peers[selfMAC] // 同锁内取：s.peers 并发注册/注销时无锁读会 race
+	if receiver == nil {
+		// 接收方自己尚未注册候选（本函数由刚上报者触发，理论不至此），
+		// 只下发公网候选，避免把对端内网地址泄露给未知出口。
+		receiver = &peerInfo{}
+	}
 	for _, p := range s.peers {
 		if p.mac != selfMAC && p.candidate != "" {
 			peers = append(peers, p)
 		}
 	}
 	s.peersMu.RUnlock()
-	receiver := s.peers[selfMAC]
-	if receiver == nil {
-		// 接收方自己尚未注册候选（本函数由刚上报者触发，理论不至此），
-		// 只下发公网候选，避免把对端内网地址泄露给未知出口。
-		receiver = &peerInfo{}
-	}
 
 	for _, p := range peers {
 		list := candidatesFor(receiver, p)
@@ -997,7 +1015,10 @@ func (s *Server) answerPeerQuery(sess *session, target string) {
 		if mac == selfMAC {
 			continue // 不回发查询者自己
 		}
-		if target != "" && ses.lease.IP.String() != target && mac != target && ses.name != target {
+		ses.p2pMu.RLock()
+		name := ses.name
+		ses.p2pMu.RUnlock()
+		if target != "" && ses.lease.IP.String() != target && mac != target && name != target {
 			continue
 		}
 		cand := ""
@@ -1015,7 +1036,7 @@ func (s *Server) answerPeerQuery(sess *session, target string) {
 				cand = "" // 全部候选对该接收方不可见 = 无候选
 			}
 		}
-		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: ses.name, cand: cand, list: list})
+		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: name, cand: cand, list: list})
 	}
 	s.peersMu.RUnlock()
 	s.mu.RUnlock()
