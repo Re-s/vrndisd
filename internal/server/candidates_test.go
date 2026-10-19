@@ -98,3 +98,26 @@ func TestCandidatesForSameEgressOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestCandidatesForNilReceiver nil 接收方（查询者未上报自己的候选）必须
+// 只回公网候选且绝不 panic。
+// 回归 2026-10-20 生产卡死事故：vrndisd peers 诊断客户端不先 P2PAdvertise
+// 就发 PeerQuery，answerPeerQuery 把 s.peers[selfMAC] 的 nil 直接透传给
+// candidatesFor，provider 持公网+LAN 混合候选时 receiver.egressIP 空指针
+// 解引用 panic，服务器被冻结到只能 SIGKILL。
+func TestCandidatesForNilReceiver(t *testing.T) {
+	// 公网 + LAN 混合候选（真实 Android 客户端的典型上报形态）
+	provider := &peerInfo{
+		candidates: []string{"1.2.3.4:100", "192.168.1.5:200"},
+		egressIP:   mustIP(t, "1.2.3.4"),
+	}
+	got := candidatesFor(nil, provider)
+	if len(got) != 1 || got[0] != "1.2.3.4:100" {
+		t.Fatalf("nil receiver: want only public cand, got %v", got)
+	}
+	// 提供者只有 LAN 候选（无出口）：nil 接收方应拿到空列表
+	lanOnly := &peerInfo{candidates: []string{"192.168.1.5:200"}, egressIP: nil}
+	if got := candidatesFor(nil, lanOnly); len(got) != 0 {
+		t.Fatalf("nil receiver + lan-only provider: want empty, got %v", got)
+	}
+}

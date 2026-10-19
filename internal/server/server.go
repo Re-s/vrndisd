@@ -584,6 +584,16 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	peer := conn.RemoteAddr().String()
+	// 兜底防御：任何消息处理路径的 panic 都只死本连接，绝不拖垮服务器
+	// （2026-10-19 事故：一次空指针 panic 在持锁区间发生，进程没崩但
+	// 服务器被冻结到只能 SIGKILL）。recover 在清理 defer 之前注册，
+	// panic 时清理 defer 先跑（关 writer、回收租约），再由本 recover 吞掉。
+	defer func() {
+		if r := recover(); r != nil {
+			conn.Close()
+			s.logger.Printf("vrndis server: 客户端 %s 处理消息时 panic，已关闭该连接: %v", peer, r)
+		}
+	}()
 	var sec *crypto.SecureConn
 	if len(s.cfg.PSK) > 0 {
 		var err error
@@ -909,7 +919,9 @@ func candidatesFor(receiver, provider *peerInfo) []string {
 			out = append(out, c)
 			continue
 		}
-		if provider.egressIP != nil && receiver.egressIP != nil && receiver.egressIP.Equal(provider.egressIP) {
+		// receiver 可能为 nil（查询者未上报候选）：保守判为未知出口，只回公网候选。
+		// 空指针解引用曾致整服务器卡死（2026-10-19 事故），此处必须先判 nil。
+		if provider.egressIP != nil && receiver != nil && receiver.egressIP != nil && receiver.egressIP.Equal(provider.egressIP) {
 			out = append(out, c)
 		}
 	}
@@ -1002,44 +1014,57 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 // 不参与打洞，兼容无副作用。
 func (s *Server) answerPeerQuery(sess *session, target string) {
 	selfMAC := sess.lease.MAC.String()
-	receiver := s.peers[selfMAC] // 接收方自己的 peer 记录（未上报候选时为 nil，此时保守只回公网候选）
+	// 接收方自己的 peer 记录：未上报候选时为 nil，保守按"未知出口"处理
+	// （内网候选只给同出口 peer，未知则只回公网候选）。
+	receiver := s.peers[selfMAC]
+	if receiver == nil {
+		receiver = &peerInfo{}
+	}
 	type peerEntry struct {
 		mac, ip, name, cand string
 		list                []string
 	}
-	s.mu.RLock()
-	s.peersMu.RLock()
-	var matched []peerEntry
-	for _, ses := range s.sessions {
-		mac := ses.lease.MAC.String()
-		if mac == selfMAC {
-			continue // 不回发查询者自己
-		}
-		ses.p2pMu.RLock()
-		name := ses.name
-		ses.p2pMu.RUnlock()
-		if target != "" && ses.lease.IP.String() != target && mac != target && name != target {
-			continue
-		}
-		cand := ""
-		var list []string
-		if p := s.peers[mac]; p != nil {
-			// 与推送/distribute 同一套过滤：内网候选只给同出口 peer。
-			// PeerQuery 由客户端 p2pConnect 拉取历史候选直接喂打洞，
-			// 不过滤会同 push 一样外泄内网地址/制造空打洞。
-			list = candidatesFor(receiver, p)
-			cand = p.candidate
-			if len(list) > 0 && !containsStr(list, cand) {
-				cand = list[0] // 主候选被过滤时回退到过滤后首条
+	// 收集阶段：锁在闭包内以 defer 释放——即便低概率 panic 也不能把
+	// s.mu/peersMu 的读锁带进坟墓（2026-10-19 卡死事故根因：panic 跳过
+	// 闭包尾部的显式 RUnlock，两把读锁被冻结 goroutine 永久持有，新会话
+	// 注册的 Lock 排队死等，管理面/数据面/停机信号全部被拖死到 SIGKILL）。
+	// 应答发送刻意留在锁外：慢查询者最多耽搁自己一条连接。
+	collect := func() (matched []peerEntry) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		for _, ses := range s.sessions {
+			mac := ses.lease.MAC.String()
+			if mac == selfMAC {
+				continue // 不回发查询者自己
 			}
-			if len(list) == 0 {
-				cand = "" // 全部候选对该接收方不可见 = 无候选
+			ses.p2pMu.RLock()
+			name := ses.name
+			ses.p2pMu.RUnlock()
+			if target != "" && ses.lease.IP.String() != target && mac != target && name != target {
+				continue
 			}
+			cand := ""
+			var list []string
+			if p := s.peers[mac]; p != nil {
+				// 与推送/distribute 同一套过滤：内网候选只给同出口 peer。
+				// PeerQuery 由客户端 p2pConnect 拉取历史候选直接喂打洞，
+				// 不过滤会同 push 一样外泄内网地址/制造空打洞。
+				list = candidatesFor(receiver, p)
+				cand = p.candidate
+				if len(list) > 0 && !containsStr(list, cand) {
+					cand = list[0] // 主候选被过滤时回退到过滤后首条
+				}
+				if len(list) == 0 {
+					cand = "" // 全部候选对该接收方不可见 = 无候选
+				}
+			}
+			matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: name, cand: cand, list: list})
 		}
-		matched = append(matched, peerEntry{mac: mac, ip: ses.lease.IP.String(), name: name, cand: cand, list: list})
+		return matched
 	}
-	s.peersMu.RUnlock()
-	s.mu.RUnlock()
+	matched := collect()
 	for _, e := range matched {
 		_ = sess.send(proto.TypePeerCandidate, mustJSON(proto.PeerCandidate{
 			Version:    proto.ProtocolVersion,
