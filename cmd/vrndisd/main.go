@@ -306,6 +306,43 @@ func discoProbe(timeout time.Duration, cand string) (time.Duration, error) {
 	}
 }
 
+// discoProbeMulti 并发探测全部候选，返回首个命中的 RTT 与候选地址。
+// 多候选拨号是"先通后升"诊断的正确姿势：同 LAN 私网候选常可秒回，
+// 而公网 srflx 在 CGNAT 无 hairpin 时永远不通——只测主候选（首个公网）
+// 会把 LAN 直连误报成"直连无响应，走服务器中继"。
+func discoProbeMulti(cands []string, wait time.Duration) (time.Duration, string) {
+	if len(cands) == 0 {
+		return 0, ""
+	}
+	type hit struct {
+		rtt  time.Duration
+		cand string
+	}
+	done := make(chan hit, len(cands))
+	for _, c := range cands {
+		go func(c string) {
+			if rtt, err := discoProbe(wait, c); err == nil {
+				done <- hit{rtt, c}
+			} else {
+				done <- hit{}
+			}
+		}(c)
+	}
+	deadline := time.NewTimer(wait + 300*time.Millisecond)
+	defer deadline.Stop()
+	for i := 0; i < len(cands); i++ {
+		select {
+		case h := <-done:
+			if h.cand != "" {
+				return h.rtt, h.cand
+			}
+		case <-deadline.C:
+			return 0, ""
+		}
+	}
+	return 0, ""
+}
+
 // loadInstalledConfig 从默认路径加载已安装服务配置（service install 写入）。
 // 包级变量便于单测注入。
 var loadInstalledConfig = func() (*service.Config, error) {
@@ -436,12 +473,18 @@ func cmdPing(args []string) error {
 		relayRTT = r
 	}
 
+	// 探测列表：全部候选优先（含 LAN），旧服务器无 Candidates 时回退主候选
+	probeList := cand.Candidates
+	if len(probeList) == 0 {
+		probeList = []string{cand.Candidate}
+	}
+
 	p2pHit := 0
 	relayHit := 0
 	for i := 0; i < *count; i++ {
-		if rtt, err := discoProbe(*wait, cand.Candidate); err == nil {
+		if rtt, hit := discoProbeMulti(probeList, *wait); hit != "" {
 			p2pHit++
-			fmt.Printf("pong from %s via p2p(%s) in %s\n", label, cand.Candidate, fmtDur(rtt))
+			fmt.Printf("pong from %s via p2p(%s) in %s\n", label, hit, fmtDur(rtt))
 			continue
 		}
 		if relayRTT > 0 {
@@ -536,8 +579,12 @@ func cmdPeers(args []string) error {
 				results[i] = fmt.Sprintf("  %-22s relay-only（未上报候选）", label)
 				return
 			}
-			if rtt, err := discoProbe(*wait, c.Candidate); err == nil {
-				results[i] = fmt.Sprintf("  %-22s via p2p(%s)  %s", label, c.Candidate, fmtDur(rtt))
+			probeList := c.Candidates
+			if len(probeList) == 0 {
+				probeList = []string{c.Candidate}
+			}
+			if rtt, hit := discoProbeMulti(probeList, *wait); hit != "" {
+				results[i] = fmt.Sprintf("  %-22s via p2p(%s)  %s", label, hit, fmtDur(rtt))
 			} else if relayRTT > 0 {
 				results[i] = fmt.Sprintf("  %-22s via relay  %s", label, fmtDur(relayRTT))
 			} else {
