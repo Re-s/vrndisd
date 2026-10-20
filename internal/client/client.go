@@ -21,15 +21,19 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"vrndis/internal/crypto"
 	"vrndis/internal/ethernet"
+	"vrndis/internal/mgmt"
 	"vrndis/internal/p2p"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
-
-	"vrndis/internal/crypto"
 )
+
+// Version 由构建脚本注入（-X vrndis/internal/client.Version=...）。
+var Version = "dev"
 
 // 默认心跳参数。
 const (
@@ -62,6 +66,10 @@ type Config struct {
 
 	// 加密。
 	PSK []byte // 预共享密钥；非 nil 时与服务器握手加密
+
+	// 本机管理面：仅回环 TCP，供 vrndisd local / status 查询本实例状态。
+	// 空用默认 127.0.0.1:7790（同机多实例自动避让到 7791..7799）；"-" 禁用。
+	ManagementListen string
 }
 
 // Client 虚拟 RNDIS 客户端。
@@ -101,6 +109,12 @@ type Client struct {
 	stopCh    chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
+
+	// 本机管理面与诊断状态。
+	mgmtSrv   *mgmt.Server
+	connects  atomic.Int64 // 成功建连次数（含首次）
+	startedAt time.Time    // 实例启动时间
+	lastFail  string       // 上一轮 P2P 打洞失败原因（p2pMu 保护）
 }
 
 // New 创建客户端（未连接）。
@@ -116,6 +130,7 @@ func New(cfg Config) *Client {
 		logger:     log.Default(),
 		stopCh:     make(chan struct{}),
 		peerCandCh: make(chan *peerInfo, 16),
+		startedAt:  time.Now(),
 	}
 }
 
@@ -320,9 +335,63 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 		c.startP2PConnect()
 	}
 
+	c.connects.Add(1)
 	c.logger.Printf("vrndis client: 已连接 %s，本机地址 %s/%d 网关 %s",
 		c.cfg.Server, assign.IP, assign.Prefix, assign.Gateway)
 	return &assign, nil
+}
+
+// managementState 生成本机客户端管理状态快照（供本机管理端口查询）。
+// 用于区分同机多实例与诊断 P2P 隧道实时状态（空闲/收发时间、失败原因）。
+func (c *Client) managementState() proto.ManagementState {
+	c.assignMu.RLock()
+	a := c.assign
+	c.assignMu.RUnlock()
+	st := proto.ClientStatus{
+		Name:      c.cfg.Name,
+		Server:    c.cfg.Server,
+		Connected: c.currentConn() != nil,
+		Connects:  c.connects.Load(),
+		StartedAt: c.startedAt,
+		P2P:       proto.ClientP2PStatus{Enabled: c.cfg.P2P},
+	}
+	if a != nil {
+		st.VirtualIP, st.VirtualMAC, st.Gateway = a.IP, a.MAC, a.Gateway
+	}
+
+	c.p2pMu.Lock()
+	tun := c.tunnel
+	peerMAC := c.peerMAC
+	peering := c.peering
+	lastFail := c.lastFail
+	c.p2pMu.Unlock()
+	if tun != nil {
+		st.P2P.Active = true
+		if peerMAC != nil {
+			st.P2P.PeerMAC = peerMAC.String()
+		}
+		if p := tun.Peer(); p != nil {
+			st.P2P.Remote = p.String()
+		}
+		st.P2P.Local = tun.Addr().String()
+		if t := tun.LastRxTime(); !t.IsZero() {
+			st.P2P.LastRxAgo = time.Since(t).Round(time.Second).String()
+		}
+		if t := tun.LastTxTime(); !t.IsZero() {
+			st.P2P.LastTxAgo = time.Since(t).Round(time.Second).String()
+		}
+	} else if peering {
+		st.P2P.LastFail = "打洞中"
+	} else if lastFail != "" {
+		st.P2P.LastFail = lastFail
+	}
+
+	return proto.ManagementState{
+		Version:   Version,
+		UpdatedAt: time.Now(),
+		Role:      "client",
+		Client:    &st,
+	}
 }
 
 // Assignment 当前分配结果（未连接时为 nil）。
@@ -445,6 +514,7 @@ func (c *Client) failP2PRound(reason string) {
 	c.p2pMu.Lock()
 	c.p2pFailures++
 	n := c.p2pFailures
+	c.lastFail = reason
 	delay := time.Minute
 	switch {
 	case n == 2:
@@ -791,6 +861,12 @@ func (c *Client) p2pConnect() {
 // 若 cfg.Reconnect 开启，断线后按指数退避自动重连（重连成功重新 Hello/Assign
 // 并刷新网卡）；重连次数达到 MaxRetries（>0）仍失败时返回最后一次错误。
 func (c *Client) Run(ctx context.Context) error {
+	// 本机管理面：与重连循环同生命周期，Stop 时关闭。
+	c.mgmtSrv = mgmt.Serve(c.cfg.ManagementListen, c.managementState, c.logger)
+	if a := c.mgmtSrv.Addr(); a != "" {
+		c.logger.Printf("vrndis client: 本机管理端口 %s", a)
+	}
+
 	if !c.cfg.Reconnect {
 		// 单连接模式（与旧行为一致）。
 		if _, err := c.connectOnce(); err != nil {
@@ -858,6 +934,10 @@ func (c *Client) Run(ctx context.Context) error {
 // 关闭整体生命周期：发送 BYE、关闭当前连接、关闭共享网卡、等待所有协程退出。
 func (c *Client) Stop() {
 	c.closeOnce.Do(func() { close(c.stopCh) })
+
+	if c.mgmtSrv != nil {
+		c.mgmtSrv.Close()
+	}
 
 	c.connMu.Lock()
 	conn := c.conn

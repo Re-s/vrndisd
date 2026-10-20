@@ -72,6 +72,8 @@ func run(argv []string) int {
 		err = cmdStatus(args[1:])
 	case "clients":
 		err = cmdClients(args[1:])
+	case "local":
+		err = cmdLocal(args[1:])
 	case "service-run":
 		err = cmdServiceRun(args[1:], globalCfg)
 	case "version", "-V", "--version":
@@ -103,6 +105,7 @@ func usage() {
   peers          列出全部在线 peer 及各自路径状态
   status         服务器运行状态与在线客户端概况
   clients        列出当前在线客户端（名称/IP/MAC/对端）
+  local          列出本机全部 vrndisd 实例（扫描本机管理端口 7790..7799）
   version        显示版本号
   help           显示本帮助
 
@@ -123,9 +126,11 @@ func usage() {
   vrndisd peers                              # 同上，列出全部在线 peer
   vrndisd peers --server 1.2.3.4:7777 --psk yourpsk
 
-示例（管理查询，服务器本机执行）：
+示例（管理查询，服务器或客户端本机执行）：
   vrndisd status                             # 状态：版本 + 在线客户端数
   vrndisd clients                            # 在线客户端：地址/名称/MAC/对端/P2P 路径
+  vrndisd local                              # 本机全部实例（server + 每个client）
+  vrndisd local --addr 127.0.0.1:7791        # 只查指定实例
 
 示例：
   sudo vrndisd server --listen 0.0.0.0:7777
@@ -706,6 +711,7 @@ func cmdClient(args []string) error {
 	fs.BoolVar(&cfg.P2P, "p2p", false, "开启 P2P 直连（客户端间 NAT 穿透走 UDP，失败回退服务器中继）")
 	fs.StringVar(&cfg.STUNServer, "stun-server", "", "STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时与服务器加密握手）")
+	fs.StringVar(&cfg.ManagementListen, "management-listen", "", "本机管理端口（默认 127.0.0.1:7790，同机多实例自动避让，- 禁用）")
 	fs.Parse(args)
 	// --server 留空时回退已安装配置（与 netcheck/ping/peers 一致）：
 	// 客户端模式取其 server 地址，服务器模式回环直连本机；psk/name 一并补齐。
@@ -788,7 +794,7 @@ func cmdService(args []string) error {
 	hbTimeout := fs.Duration("heartbeat-timeout", 0, "client: 心跳超时阈值（0=默认 30s）")
 	stunServer := fs.String("stun-server", "", "client: STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时启用加密握手，server/client 通用）")
-	mgmtListen := fs.String("management-listen", "", "server: 本机管理端口（默认 127.0.0.1:7790，- 禁用）")
+	mgmtListen := fs.String("management-listen", "", "本机管理端口（默认 127.0.0.1:7790，同机多实例自动避让，- 禁用）")
 	output := fs.String("output", "", "export: 写入的目标文件（默认打印到 stdout）")
 	printCfg := fs.Bool("print-config", false, "install: 仅打印将写入的配置 JSON，不安装服务")
 	fs.Parse(args[1:])
@@ -962,15 +968,16 @@ func cmdServiceRun(args []string, globalCfg string) error {
 		switch cfg.Mode {
 		case "server":
 			srv, err := server.New(server.Config{
-				Listen:  cfg.Listen,
-				Network: cfg.Network,
-				Gateway: cfg.Gateway,
-				DNS:     cfg.DNS,
-				TapName: cfg.Tap,
-				TapMAC:  cfg.TapMAC,
-				MTU:     cfg.MTU,
-				P2P:     cfg.P2P,
-				PSK:     []byte(cfg.PSK),
+				Listen:           cfg.Listen,
+				Network:          cfg.Network,
+				Gateway:          cfg.Gateway,
+				DNS:              cfg.DNS,
+				TapName:          cfg.Tap,
+				TapMAC:           cfg.TapMAC,
+				MTU:              cfg.MTU,
+				P2P:              cfg.P2P,
+				PSK:              []byte(cfg.PSK),
+				ManagementListen: cfg.ManagementListen,
 			})
 			if err != nil {
 				return err
@@ -1009,6 +1016,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 				HeartbeatInterval: time.Duration(cfg.HeartbeatInterval),
 				HeartbeatTimeout:  time.Duration(cfg.HeartbeatTimeout),
 				PSK:               []byte(cfg.PSK),
+				ManagementListen:  cfg.ManagementListen,
 			})
 			return c.Run(ctx)
 		default:
@@ -1142,4 +1150,99 @@ func cmdClients(args []string) error {
 		fmt.Printf("  %d. %s (%s/%s) -> %s [p2p: %s]\n", i+1, c.IP, c.Name, c.MAC, c.Peer, c.P2P)
 	}
 	return nil
+}
+
+// localScanPorts 本机管理端口扫描范围（与 mgmt 包默认避让区间一致）。
+const localScanPorts = 10
+
+// cmdLocal 列出本机全部 vrndisd 实例：并发扫描本机管理端口 7790..7799，
+// server 与每个 client 实例各打印一行概要。--addr 只查指定实例。
+func cmdLocal(args []string) error {
+	fs := flag.NewFlagSet("local", flag.ExitOnError)
+	mgmtAddr := fs.String("addr", "", "只查指定管理端口地址（默认扫描 127.0.0.1:7790..7799）")
+	fs.Parse(args)
+
+	if *mgmtAddr != "" {
+		state, err := queryManagement(*mgmtAddr, "status")
+		if err != nil {
+			return err
+		}
+		printInstance(*mgmtAddr, state)
+		return nil
+	}
+
+	type result struct {
+		port  int
+		state *proto.ManagementState
+		err   error
+	}
+	results := make(chan result, localScanPorts)
+	for i := 0; i < localScanPorts; i++ {
+		port := 7790 + i
+		go func() {
+			state, err := queryManagement(fmt.Sprintf("127.0.0.1:%d", port), "status")
+			results <- result{port, state, err}
+		}()
+	}
+	found := 0
+	for i := 0; i < localScanPorts; i++ {
+		r := <-results
+		if r.err != nil {
+			continue // 该端口无实例（连接拒绝等）
+		}
+		found++
+		printInstance(fmt.Sprintf("127.0.0.1:%d", r.port), r.state)
+	}
+	if found == 0 {
+		fmt.Println("本机没有运行中的 vrndisd 实例（扫描 127.0.0.1:7790..7799 无响应）")
+		fmt.Println("提示: client 的管理面随客户端一起运行；若用 --management-listen 改过端口，请用 --addr 指定")
+	}
+	return nil
+}
+
+// printInstance 打印单个本机实例状态概要（server / client 各一行，client 附 P2P 详情）。
+func printInstance(addr string, state *proto.ManagementState) {
+	if state.Role == "client" && state.Client != nil {
+		c := state.Client
+		status := "未连接"
+		if c.Connected {
+			status = "已连接 " + c.VirtualIP
+			if c.VirtualMAC != "" {
+				status += " (" + c.VirtualMAC + ")"
+			}
+		}
+		p2p := "未启用"
+		if c.P2P.Enabled {
+			switch {
+			case c.P2P.Active:
+				p2p = "直连中 -> " + c.P2P.PeerMAC
+				if c.P2P.Remote != "" {
+					p2p += " @ " + c.P2P.Remote
+				}
+				var ago []string
+				if c.P2P.LastRxAgo != "" {
+					ago = append(ago, "rx "+c.P2P.LastRxAgo)
+				}
+				if c.P2P.LastTxAgo != "" {
+					ago = append(ago, "tx "+c.P2P.LastTxAgo)
+				}
+				if len(ago) > 0 {
+					p2p += "（" + strings.Join(ago, " ") + "）"
+				}
+			case c.P2P.LastFail != "":
+				p2p = "中继（" + c.P2P.LastFail + "）"
+			default:
+				p2p = "中继"
+			}
+		}
+		name := c.Name
+		if name == "" {
+			name = "(未命名)"
+		}
+		fmt.Printf("  %s  client %s  %s\n", addr, state.Version, name)
+		fmt.Printf("    server=%s %s，建连 %d 次，p2p: %s\n", c.Server, status, c.Connects, p2p)
+		return
+	}
+	// 旧版服务器无 Role 字段，按 server 处理
+	fmt.Printf("  %s  server %s  在线客户端=%d\n", addr, state.Version, len(state.Clients))
 }

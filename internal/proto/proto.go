@@ -167,9 +167,36 @@ type ManagementResponse struct {
 // ManagementState 本地管理状态文件（替代 clients 命令 TCP 自连查询）：
 // 服务器在启停与客户端上下线时写入，vrndisd clients/status 直接读取。
 type ManagementState struct {
-	Version   string       `json:"version"`
-	UpdatedAt time.Time    `json:"updated_at"`
-	Clients   []ClientInfo `json:"clients"`
+	Version   string        `json:"version"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	Role      string        `json:"role,omitempty"`   // server | client；旧版服务器为空，查询方按 server 处理
+	Clients   []ClientInfo  `json:"clients"`          // server: 在线客户端列表
+	Client    *ClientStatus `json:"client,omitempty"` // client: 本实例状态
+}
+
+// ClientStatus 客户端实例自身状态（client 本机管理面专用）。
+type ClientStatus struct {
+	Name       string          `json:"name"`
+	Server     string          `json:"server"`
+	Connected  bool            `json:"connected"`
+	Connects   int64           `json:"connects"` // 成功建连次数（含首次）
+	VirtualIP  string          `json:"virtual_ip,omitempty"`
+	VirtualMAC string          `json:"virtual_mac,omitempty"`
+	Gateway    string          `json:"gateway,omitempty"`
+	StartedAt  time.Time       `json:"started_at"`
+	P2P        ClientP2PStatus `json:"p2p"`
+}
+
+// ClientP2PStatus P2P 直连状态（诊断打洞失败 / 隧道空闲关闭用）。
+type ClientP2PStatus struct {
+	Enabled   bool   `json:"enabled"`
+	Active    bool   `json:"active"`                // 隧道存活
+	PeerMAC   string `json:"peer_mac,omitempty"`    // 对端虚拟 MAC
+	Local     string `json:"local,omitempty"`       // 本端 UDP 地址
+	Remote    string `json:"remote,omitempty"`      // 对端 UDP 地址
+	LastRxAgo string `json:"last_rx_ago,omitempty"` // 距上次收到数据
+	LastTxAgo string `json:"last_tx_ago,omitempty"` // 距上次发出数据
+	LastFail  string `json:"last_fail,omitempty"`   // 上一轮打洞失败原因
 }
 
 // CustomClientInfo for JSON

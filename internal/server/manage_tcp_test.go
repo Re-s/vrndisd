@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"vrndis/internal/mgmt"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
 )
@@ -66,9 +67,8 @@ func mgmtQuery(t *testing.T, addr string) proto.ManagementState {
 
 func fastManagementWatch(t *testing.T) {
 	t.Helper()
-	orig := managementWatchInterval
-	managementWatchInterval = 50 * time.Millisecond
-	t.Cleanup(func() { managementWatchInterval = orig })
+	mgmt.SetWatchIntervalForTest(50 * time.Millisecond)
+	t.Cleanup(func() { mgmt.SetWatchIntervalForTest(10 * time.Second) })
 }
 
 // TestManagementTCPQuery - 起服后经回环 TCP 管理端口查询在线客户端快照。

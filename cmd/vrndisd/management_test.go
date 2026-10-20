@@ -95,3 +95,45 @@ func TestQueryManagementDefaultAddr(t *testing.T) {
 		t.Fatalf("错误提示不明确: %s", msg)
 	}
 }
+
+// TestCmdLocalAddr - local --addr 单查：client 实例应打印 P2P 状态概要。
+func TestCmdLocalAddr(t *testing.T) {
+	state := proto.ManagementState{
+		Version:   "1.0.0",
+		UpdatedAt: time.Now(),
+		Role:      "client",
+		Client: &proto.ClientStatus{
+			Name:       "x16",
+			Server:     "203.0.113.1:7777",
+			Connected:  true,
+			Connects:   3,
+			VirtualIP:  "10.77.0.3",
+			VirtualMAC: "02:00:00:00:00:03",
+			P2P: proto.ClientP2PStatus{
+				Enabled:   true,
+				Active:    true,
+				PeerMAC:   "02:00:00:00:00:05",
+				Remote:    "192.168.1.100:54321",
+				LastRxAgo: "2s",
+				LastTxAgo: "1s",
+			},
+		},
+	}
+	addr := fakeMgmtServer(t, state)
+	if err := cmdLocal([]string{"--addr", addr}); err != nil {
+		t.Fatalf("cmdLocal err=%v", err)
+	}
+}
+
+// TestCmdLocalLegacyServer - 旧版服务器无 Role 字段时按 server 打印（兼容）。
+func TestCmdLocalLegacyServer(t *testing.T) {
+	state := proto.ManagementState{
+		Version:   "1.0.0",
+		UpdatedAt: time.Now(),
+		Clients:   []proto.ClientInfo{{Name: "pc-a", IP: "10.77.0.2"}},
+	}
+	addr := fakeMgmtServer(t, state)
+	if err := cmdLocal([]string{"--addr", addr}); err != nil {
+		t.Fatalf("cmdLocal err=%v", err)
+	}
+}

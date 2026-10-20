@@ -45,6 +45,10 @@ type Tunnel struct {
 	// 供 AttachIdleMonitor 轮询判断隧道是否空闲；不要再读 socket。
 	lastRx   time.Time
 	lastRxMu sync.Mutex
+
+	// lastTx 记录最近一次发出数据的时间（同锁保护，供本机管理面诊断）。
+	lastTx   time.Time
+	lastTxMu sync.Mutex
 }
 
 // Punch 向 peerCandidates 打洞：持续向候选地址发送探测包，并等待收到对端探测。
@@ -205,6 +209,26 @@ func (t *Tunnel) touchRx() {
 	t.lastRxMu.Unlock()
 }
 
+func (t *Tunnel) touchTx() {
+	t.lastTxMu.Lock()
+	t.lastTx = time.Now()
+	t.lastTxMu.Unlock()
+}
+
+// LastRxTime 返回最近一次收到数据的时间（未收发过返回零值）。
+func (t *Tunnel) LastRxTime() time.Time {
+	t.lastRxMu.Lock()
+	defer t.lastRxMu.Unlock()
+	return t.lastRx
+}
+
+// LastTxTime 返回最近一次发出数据的时间（未发过返回零值）。
+func (t *Tunnel) LastTxTime() time.Time {
+	t.lastTxMu.Lock()
+	defer t.lastTxMu.Unlock()
+	return t.lastTx
+}
+
 func (t *Tunnel) SetReadDeadline(dl time.Time) error {
 	return t.conn.SetReadDeadline(dl)
 }
@@ -221,6 +245,9 @@ func (t *Tunnel) Write(frame []byte) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	_, err := t.conn.WriteToUDP(frame, peer)
+	if err == nil {
+		t.touchTx()
+	}
 	return err
 }
 

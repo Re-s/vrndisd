@@ -17,6 +17,7 @@ import (
 	"vrndis/internal/crypto"
 	"vrndis/internal/ethernet"
 	"vrndis/internal/ethswitch"
+	"vrndis/internal/mgmt"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
 )
@@ -87,14 +88,14 @@ type peerInfo struct {
 
 // Server 虚拟 RNDIS 服务器。
 type Server struct {
-	cfg    Config
-	dev    tap.Device
-	pool   *addr.Pool
-	sw     *ethswitch.LearningSwitch
-	tapMAC net.HardwareAddr
-	ln     net.Listener
-	logger *log.Logger
-	mgmtLn net.Listener // 本机管理 TCP 监听（clients/status 查询）
+	cfg     Config
+	dev     tap.Device
+	pool    *addr.Pool
+	sw      *ethswitch.LearningSwitch
+	tapMAC  net.HardwareAddr
+	ln      net.Listener
+	logger  *log.Logger
+	mgmtSrv *mgmt.Server // 本机管理 TCP（clients/status 查询，端口自动避让）
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -291,10 +292,14 @@ func (s *Server) Start() error {
 	s.logger.Printf("vrndis server: TAP %s 就绪（网关 %s/%d），监听 %s",
 		dev.Name(), s.cfg.Gateway, s.pool.Prefix(), s.ln.Addr())
 
-	s.wg.Add(4)
+	s.mgmtSrv = mgmt.Serve(s.cfg.ManagementListen, s.managementState, s.logger)
+	if a := s.mgmtSrv.Addr(); a != "" {
+		s.logger.Printf("vrndis server: 本机管理端口 %s", a)
+	}
+
+	s.wg.Add(3)
 	go s.acceptLoop()
 	go s.tapLoop()
-	go s.manageLoop()
 	go s.tapWriter()
 	return nil
 }
@@ -314,8 +319,8 @@ func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 		s.ln.Close()
-		if s.mgmtLn != nil {
-			s.mgmtLn.Close()
+		if s.mgmtSrv != nil {
+			s.mgmtSrv.Close()
 		}
 		if s.dev != nil {
 			s.dev.Close()
@@ -387,98 +392,17 @@ func (s *Server) managementState() proto.ManagementState {
 	return proto.ManagementState{
 		Version:   Version,
 		UpdatedAt: time.Now(),
+		Role:      "server",
 		Clients:   list,
 	}
 }
 
-// managementWatchInterval 管理端口监听失败后的重试间隔（端口被占用等）。
-// 包级变量便于测试调小。
-var managementWatchInterval = 10 * time.Second
-
-// manageLoop 监听本机管理端口（TCP，仅回环），响应 clients/status 查询。
-// 每个连接读一行 ManagementRequest JSON，回 ManagementState JSON。
-// TCP 化消除了 unix socket 文件残留/被外部删除的竞态：Accept 错误即重建。
-func (s *Server) manageLoop() {
-	defer s.wg.Done()
-	addr := s.managementListenAddr()
-	if addr == "" {
-		return
-	}
-	for {
-		ln := s.listenManagement(addr)
-		if ln == nil {
-			// 监听失败（端口占用等）：等待后重试，不退出
-			select {
-			case <-s.stopCh:
-				return
-			case <-time.After(managementWatchInterval):
-			}
-			continue
-		}
-		if !s.acceptManagement(ln) {
-			return // 收到 stop 信号：退出
-		}
-	}
-}
-
-// listenManagement 创建（或重建）管理 TCP listener 并记录到 s.mgmtLn。
-func (s *Server) listenManagement(addr string) net.Listener {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		s.logger.Printf("vrndis server: 管理端口监听失败 %s: %v", addr, err)
-		return nil
-	}
-	s.mu.Lock()
-	s.mgmtLn = ln
-	s.mu.Unlock()
-	s.logger.Printf("vrndis server: 管理端口 %s", addr)
-	return ln
-}
-
-// ManagementAddr 返回当前管理监听地址（未监听/已停止返回空）。
+// ManagementAddr 返回当前管理监听地址（未监听/已停止/已禁用返回空）。
 func (s *Server) ManagementAddr() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.mgmtLn == nil {
+	if s.mgmtSrv == nil {
 		return ""
 	}
-	return s.mgmtLn.Addr().String()
-}
-
-// acceptManagement 接受管理查询连接。
-// 返回 false 表示收到 stop 信号（manageLoop 应退出）；
-// 返回 true 表示 listener 不可用（被关闭等），应重建。
-func (s *Server) acceptManagement(ln net.Listener) bool {
-	for {
-		conn, err := ln.Accept()
-		if err == nil {
-			s.handleManagementConn(conn)
-			continue
-		}
-		select {
-		case <-s.stopCh:
-			ln.Close()
-			return false
-		default:
-		}
-		// Accept 错误（listener 被关闭等）：重建
-		return true
-	}
-}
-
-// handleManagementConn 处理单个管理查询连接（同步短连接）。
-func (s *Server) handleManagementConn(conn net.Conn) {
-	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var req proto.ManagementRequest
-	dec := json.NewDecoder(conn)
-	if err := dec.Decode(&req); err != nil {
-		return // 非法请求直接关闭
-	}
-	// 所有命令统一返回完整实时状态快照（clients 命令取 .Clients）。
-	state := s.managementState()
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_ = json.NewEncoder(conn).Encode(state)
+	return s.mgmtSrv.Addr()
 }
 
 // SessionCount 当前在线客户端数。
