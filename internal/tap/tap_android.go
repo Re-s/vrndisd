@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -123,6 +124,18 @@ func (t *androidTAP) SetIPv4(ip net.IP, prefix int) error {
 		}
 	}
 	t.subnet = &net.IPNet{IP: ip4.Mask(net.CIDRMask(prefix, 32)), Mask: net.CIDRMask(prefix, 32)}
+	return nil
+}
+
+// SetMTU 用 ip 命令设置网卡 MTU（Android 无 SIOCSIFMTU 权限，走 ip link）。
+func (t *androidTAP) SetMTU(mtu int) error {
+	if mtu <= 0 {
+		return nil
+	}
+	out, err := exec.Command("ip", "link", "set", "dev", t.name, "mtu", strconv.Itoa(mtu)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip link set mtu: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 

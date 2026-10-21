@@ -255,6 +255,19 @@ func (t *windowsTAP) SetIPv4(ip net.IP, prefix int) error {
 	return nil
 }
 
+// SetMTU 用 netsh 设置适配器 MTU（wintun 适配器支持任意外层 MTU）。
+func (t *windowsTAP) SetMTU(mtu int) error {
+	if mtu <= 0 {
+		return nil
+	}
+	out, err := exec.Command("netsh", "interface", "ipv4", "set", "subinterface",
+		fmt.Sprintf("interface=%s", t.name), fmt.Sprintf("mtu=%d", mtu), "store=persistent").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("netsh set mtu: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (t *windowsTAP) Up() error {
 	out, err := exec.Command("netsh", "interface", "set", "interface",
 		fmt.Sprintf("name=%s", t.name), "admin=enabled").CombinedOutput()

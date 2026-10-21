@@ -21,6 +21,7 @@ const (
 	siocSifHWAddr  = 0x8924
 	siocSifAddr    = 0x8916
 	siocSifNetmask = 0x891C
+	siocSifMTU     = 0x8922
 	arphrdEther    = 1
 	iffUp          = 0x1
 	ifreqSize      = 40
@@ -120,6 +121,17 @@ func (t *linuxTAP) SetIPv4(ip net.IP, prefix int) error {
 	// 因为此刻网卡尚未 up，会报 "Device for nexthop is not up"。
 	t.subnet = &net.IPNet{IP: ip4.Mask(net.CIDRMask(prefix, 32)), Mask: net.CIDRMask(prefix, 32)}
 	return nil
+}
+
+// SetMTU 用 SIOCSIFMTU 设置网卡 MTU。需在 Up 前后调用均可。
+func (t *linuxTAP) SetMTU(mtu int) error {
+	if mtu <= 0 {
+		return nil // 不设置，保持系统默认
+	}
+	var ifr [ifreqSize]byte
+	copy(ifr[:15], t.name)
+	*(*int32)(unsafe.Pointer(&ifr[16])) = int32(mtu)
+	return ioctl(uintptr(t.ctl), siocSifMTU, &ifr[0])
 }
 
 func (t *linuxTAP) Up() error {

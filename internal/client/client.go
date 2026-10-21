@@ -237,6 +237,12 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 		conn.Close()
 		return nil, fmt.Errorf("set ipv4: %w", err)
 	}
+	// 按服务器下发的 MTU 设置网卡：UDP 隧道封装（+20~28 字节）超过外层链路
+	// MTU 会触发 IP 分片，分片包在 WiFi/移动网络上丢一个片整帧全废——
+	// 服务器统一配 1400 即可消除分片（旧服务器不下发则保持系统默认）。
+	if err := dev.SetMTU(assign.MTU); err != nil {
+		c.logger.Printf("vrndis client: 设置 MTU %d 失败（继续运行）: %v", assign.MTU, err)
+	}
 	if err := dev.Up(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("tap up: %w", err)

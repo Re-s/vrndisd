@@ -22,6 +22,8 @@ type Device interface {
 	SetMAC(mac net.HardwareAddr) error
 	// SetIPv4 配置 IPv4 地址与前缀。
 	SetIPv4(ip net.IP, prefix int) error
+	// SetMTU 设置网卡 MTU（mtu<=0 表示不设置，保持系统默认）。
+	SetMTU(mtu int) error
 	// Up 置为启用。
 	Up() error
 	// AddDefaultRoute 把系统默认路由指向本网卡（可选功能）。
@@ -105,6 +107,7 @@ func (f *Fake) SetIPv4(ip net.IP, prefix int) error {
 	return nil
 }
 func (f *Fake) Up() error                            { f.UpFlag = true; return nil }
+func (f *Fake) SetMTU(mtu int) error                 { return nil }
 func (f *Fake) AddDefaultRoute(gateway net.IP) error { f.Route = gateway; return nil }
 func (f *Fake) Name() string                         { return f.name }
 
