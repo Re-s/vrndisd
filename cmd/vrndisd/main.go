@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -567,6 +568,9 @@ func cmdPeers(args []string) error {
 	if r, err := sess.PingRTT(3 * time.Second); err == nil {
 		relayRTT = r
 	}
+	// 以本机为基准：先问本机常驻 client 的真实隧道（对端 MAC -> remote 地址），
+	// 服务器返回的候选是快照，嵌套 NAT 下常不可达，直接照着探会误报 relay。
+	tunnels := localTunnels()
 
 	fmt.Printf("在线 peer (%d)：\n", len(cands))
 	var wg sync.WaitGroup
@@ -583,6 +587,14 @@ func cmdPeers(args []string) error {
 				// 在线但未上报候选（未开 -p2p / 打洞失败已撤回）：只能走中继。
 				results[i] = fmt.Sprintf("  %-22s relay-only（未上报候选）", label)
 				return
+			}
+			// 本机正好与此 peer 有活跃隧道：直接测隧道真实对端地址
+			if tun, ok := tunnels[c.PeerMAC]; ok && tun.Remote != "" {
+				if rtt, err := discoProbe(*wait, tun.Remote); err == nil {
+					results[i] = fmt.Sprintf("  %-22s via p2p(%s)  %s（本机隧道）", label, tun.Remote, fmtDur(rtt))
+					return
+				}
+				// 隧道存在但探不通（可能正切换中）：fallthrough 到候选探测
 			}
 			probeList := c.Candidates
 			if len(probeList) == 0 {
@@ -1171,6 +1183,26 @@ func cmdLocal(args []string) error {
 		return nil
 	}
 
+	found := scanLocalStates()
+	for _, r := range found {
+		printInstance(fmt.Sprintf("127.0.0.1:%d", r.Port), &r.State)
+	}
+	if len(found) == 0 {
+		fmt.Println("本机没有运行中的 vrndisd 实例（扫描 127.0.0.1:7790..7799 无响应）")
+		fmt.Println("提示: client 的管理面随客户端一起运行；若用 --management-listen 改过端口，请用 --addr 指定")
+	}
+	return nil
+}
+
+// localInstance 本机管理端口扫描结果。
+type localInstance struct {
+	Port  int
+	State proto.ManagementState
+}
+
+// scanLocalStates 并发扫描本机管理端口 7790..7799，按端口号升序返回全部实例状态。
+// 端口无实例（连接拒绝）的项被跳过。
+func scanLocalStates() []localInstance {
 	type result struct {
 		port  int
 		state *proto.ManagementState
@@ -1184,20 +1216,29 @@ func cmdLocal(args []string) error {
 			results <- result{port, state, err}
 		}()
 	}
-	found := 0
+	var got []localInstance
 	for i := 0; i < localScanPorts; i++ {
 		r := <-results
-		if r.err != nil {
-			continue // 该端口无实例（连接拒绝等）
+		if r.err == nil && r.state != nil {
+			got = append(got, localInstance{Port: r.port, State: *r.state})
 		}
-		found++
-		printInstance(fmt.Sprintf("127.0.0.1:%d", r.port), r.state)
 	}
-	if found == 0 {
-		fmt.Println("本机没有运行中的 vrndisd 实例（扫描 127.0.0.1:7790..7799 无响应）")
-		fmt.Println("提示: client 的管理面随客户端一起运行；若用 --management-listen 改过端口，请用 --addr 指定")
+	sort.Slice(got, func(i, j int) bool { return got[i].Port < got[j].Port })
+	return got
+}
+
+// localTunnels 取本机所有 client 实例当前活跃的 P2P 隧道：对端虚拟 MAC -> 隧道状态。
+// peers 等"以本机为基准"的诊断用它判断本机与某 peer 的真实数据面路径，
+// 不再依赖服务器侧快照候选（嵌套 NAT 下候选常不可达，显示失真）。
+func localTunnels() map[string]proto.ClientP2PStatus {
+	tunnels := map[string]proto.ClientP2PStatus{}
+	for _, inst := range scanLocalStates() {
+		c := inst.State.Client
+		if inst.State.Role == "client" && c != nil && c.P2P.Active && c.P2P.PeerMAC != "" {
+			tunnels[c.P2P.PeerMAC] = c.P2P
+		}
 	}
-	return nil
+	return tunnels
 }
 
 // printInstance 打印单个本机实例状态概要（server / client 各一行，client 附 P2P 详情）。
