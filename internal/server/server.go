@@ -185,11 +185,18 @@ func (s *session) enqueueFrame(frame []byte) {
 }
 
 // writer 把队列中的帧写回连接。
+//
+// writeMsg 非原子（5 字节头与 body 分两次写），必须持 writeMu 与
+// send/sendControl（控制消息、候选推送等）互斥，否则字节流交错、
+// 对端解密出乱序 seq -> "replayed message" 误断连（高负载下必发）。
 func (s *session) writer() {
 	for {
 		select {
 		case frame := <-s.outQ:
-			if err := s.writeMsg(proto.TypeData, frame); err != nil {
+			s.writeMu.Lock()
+			err := s.writeMsg(proto.TypeData, frame)
+			s.writeMu.Unlock()
+			if err != nil {
 				return
 			}
 		case <-s.done:
