@@ -218,7 +218,11 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	} else if dev == nil {
 		dev = c.dev
 	}
-	c.dev = dev // 统一登记共享网卡（注入 Fake 或真实 TAP）
+	if c.dev == nil {
+		// 统一登记共享网卡（注入 Fake 或真实 TAP）；后续重连只读不写，
+		// 否则与常驻 devToSock、以及每连接启动的 sockToDev 存在数据竞争。
+		c.dev = dev
+	}
 	mac, err := ethernet.MACFromString(assign.MAC)
 	if err != nil {
 		conn.Close()
@@ -323,11 +327,12 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	c.conn = conn
 	c.connDone = make(chan struct{})
 	c.connOnce = sync.Once{}
+	done := c.connDone // 本连接专属信号：goroutine 内只持有快照，不再读可变字段
 	c.connMu.Unlock()
 
 	c.connWG.Add(2)
-	go c.sockToDev(conn)
-	go c.heartbeat(conn)
+	go c.sockToDev(conn, done)
+	go c.heartbeat(conn, done)
 
 	c.devPumpOnce.Do(func() {
 		c.wg.Add(1)
@@ -1036,14 +1041,14 @@ func (c *Client) notePong() {
 }
 
 // sockToDev 该连接的读方向：socket → 本地网卡。连接断开/收到 BYE 时结束本连接。
-func (c *Client) sockToDev(conn net.Conn) {
+func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 	defer c.connWG.Done()
 	for {
 		msg, err := proto.ReadMessage(conn)
 		if err != nil {
 			select {
 			case <-c.stopCh:
-			case <-c.connDone:
+			case <-done:
 			default:
 				c.logger.Printf("vrndis client: 连接关闭: %v", err)
 			}
@@ -1239,7 +1244,7 @@ func (c *Client) devToSock() {
 }
 
 // heartbeat 主动断线检测：周期性 Ping，超时未收到 Pong/Ping 判定断线并结束本连接。
-func (c *Client) heartbeat(conn net.Conn) {
+func (c *Client) heartbeat(conn net.Conn, done chan struct{}) {
 	defer c.connWG.Done()
 	interval := c.cfg.HeartbeatInterval
 	if interval <= 0 {
@@ -1254,7 +1259,7 @@ func (c *Client) heartbeat(conn net.Conn) {
 	defer t.Stop()
 	for {
 		select {
-		case <-c.connDone:
+		case <-done:
 			return
 		case <-c.stopCh:
 			return

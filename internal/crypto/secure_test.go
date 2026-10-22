@@ -45,10 +45,12 @@ func (c *pairConn) Read(b []byte) (int, error) {
 }
 
 func (c *pairConn) Write(b []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.peer.remain = append(c.peer.remain, append([]byte(nil), b...)...)
-	c.peer.cond.Signal()
+	// remain 属于 peer，必须在 peer.mu 下修改，否则与 peer 的 Read 数据竞争。
+	peer := c.peer
+	peer.mu.Lock()
+	peer.remain = append(peer.remain, append([]byte(nil), b...)...)
+	peer.mu.Unlock()
+	peer.cond.Signal()
 	return len(b), nil
 }
 

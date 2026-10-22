@@ -56,6 +56,7 @@ type Fake struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 
+	mu     sync.Mutex // 保护下列可变状态：client 连接协程写、测试协程读
 	MAC    net.HardwareAddr
 	IPv4   string
 	UpFlag bool
@@ -101,12 +102,36 @@ func (f *Fake) Write(frame []byte) error {
 	}
 }
 
-func (f *Fake) SetMAC(mac net.HardwareAddr) error { f.MAC = mac; return nil }
-func (f *Fake) SetIPv4(ip net.IP, prefix int) error {
-	f.IPv4 = ip.String() + "/" + itoa(prefix)
+func (f *Fake) SetMAC(mac net.HardwareAddr) error {
+	f.mu.Lock()
+	f.MAC = mac
+	f.mu.Unlock()
 	return nil
 }
-func (f *Fake) Up() error                            { f.UpFlag = true; return nil }
+func (f *Fake) SetIPv4(ip net.IP, prefix int) error {
+	f.mu.Lock()
+	f.IPv4 = ip.String() + "/" + itoa(prefix)
+	f.mu.Unlock()
+	return nil
+}
+
+// IPv4Addr / MACAddr 线程安全读取（重连测试跨 goroutine 断言用）。
+func (f *Fake) IPv4Addr() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.IPv4
+}
+func (f *Fake) MACAddr() net.HardwareAddr {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MAC
+}
+func (f *Fake) Up() error {
+	f.mu.Lock()
+	f.UpFlag = true
+	f.mu.Unlock()
+	return nil
+}
 func (f *Fake) SetMTU(mtu int) error                 { return nil }
 func (f *Fake) AddDefaultRoute(gateway net.IP) error { f.Route = gateway; return nil }
 func (f *Fake) Name() string                         { return f.name }

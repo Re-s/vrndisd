@@ -85,11 +85,11 @@ func TestClientConnectAssignConfiguresDevice(t *testing.T) {
 	if asg.IP != "10.77.0.2" || asg.MAC != "02:00:00:00:00:01" {
 		t.Fatalf("assign: %+v", asg)
 	}
-	if dev.IPv4 != "10.77.0.2/24" {
-		t.Fatalf("device ipv4: %q", dev.IPv4)
+	if dev.IPv4Addr() != "10.77.0.2/24" {
+		t.Fatalf("device ipv4: %q", dev.IPv4Addr())
 	}
-	if dev.MAC.String() != "02:00:00:00:00:01" {
-		t.Fatalf("device mac: %v", dev.MAC)
+	if dev.MACAddr().String() != "02:00:00:00:00:01" {
+		t.Fatalf("device mac: %v", dev.MACAddr())
 	}
 	if !dev.UpFlag {
 		t.Fatal("device not up")

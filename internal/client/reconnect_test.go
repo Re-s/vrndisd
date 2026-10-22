@@ -90,9 +90,9 @@ func TestReconnectAfterEOF(t *testing.T) {
 
 	// 等待重连完成：设备上刷新为第二条连接的地址。
 	deadline := time.Now().Add(5 * time.Second)
-	for dev.IPv4 != "10.77.0.3/24" || dev.MAC.String() != "02:00:00:00:00:02" {
+	for dev.IPv4Addr() != "10.77.0.3/24" || dev.MACAddr().String() != "02:00:00:00:00:02" {
 		if time.Now().After(deadline) {
-			t.Fatalf("reconnect did not refresh device; ipv4=%q mac=%v", dev.IPv4, dev.MAC)
+			t.Fatalf("reconnect did not refresh device; ipv4=%q mac=%v", dev.IPv4Addr(), dev.MACAddr())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -139,9 +139,9 @@ func TestReconnectAfterHeartbeatTimeout(t *testing.T) {
 	go func() { done <- c.Run(ctx) }()
 
 	deadline := time.Now().Add(5 * time.Second)
-	for dev.IPv4 != "10.77.0.3/24" {
+	for dev.IPv4Addr() != "10.77.0.3/24" {
 		if time.Now().After(deadline) {
-			t.Fatalf("heartbeat did not trigger reconnect; ipv4=%q", dev.IPv4)
+			t.Fatalf("heartbeat did not trigger reconnect; ipv4=%q", dev.IPv4Addr())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
