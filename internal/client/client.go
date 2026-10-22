@@ -497,6 +497,18 @@ func (c *Client) hasTunnel() bool {
 	return tun != nil
 }
 
+// tunnelPeerIs 报告当前 P2P 隧道对端是否为该 MAC（隧道存活时候选无意义）。
+func (c *Client) tunnelPeerIs(mac net.HardwareAddr) bool {
+	c.p2pMu.Lock()
+	tun := c.tunnel
+	pm := c.peerMAC
+	c.p2pMu.Unlock()
+	if tun == nil || pm == nil {
+		return false
+	}
+	return bytes.Equal(pm, mac)
+}
+
 // startP2PConnect 抢占式启动一轮打洞：通过 p2pActive/隧道/退避三重检查后
 // 同步置位 p2pActive（防止广播多条候选推送各起一个 goroutine 的风暴），
 // goroutine 退出时复位。连接路径与事件驱动重试均经此入口。
@@ -1124,6 +1136,9 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 					}
 				}
 				if len(addrs) > 0 {
+					if c.tunnelPeerIs(mac) {
+						break // 已与该 peer 直连：新候选无意义，直接丢弃
+					}
 					select {
 					case c.peerCandCh <- &peerInfo{MAC: mac, Addrs: addrs}:
 					default:

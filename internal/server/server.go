@@ -175,6 +175,16 @@ func (s *session) sendControl(typ byte, body []byte) {
 	}()
 }
 
+// p2pReadyPeer 返回该会话是否已与对端建立 P2P 直连及对端虚拟 MAC。
+// 候选推送据此跳过已直连的双方——隧道活着时新候选无意义，且客户端
+// 消费端不取会积满丢弃刷日志。状态由 P2PReady 置位、P2PWithdraw
+// 或连接断开复位，与客户端隧道生命周期一致。
+func (s *session) p2pReadyPeer() (bool, string) {
+	s.p2pMu.RLock()
+	defer s.p2pMu.RUnlock()
+	return s.p2pReady, s.p2pPeerMAC
+}
+
 func (s *session) enqueueFrame(frame []byte) {
 	buf := append([]byte(nil), frame...)
 	select {
@@ -884,6 +894,9 @@ func (s *Server) pushCandidateToOthers(sess *session, selfMAC string, selfCands 
 		return
 	}
 	for _, p := range others {
+		if ready, peerMAC := p.sess.p2pReadyPeer(); ready && peerMAC == selfMAC {
+			continue // 接收方已与 self 直连，无需再推
+		}
 		list := candidatesFor(p, self)
 		if len(list) == 0 {
 			continue
@@ -919,6 +932,9 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 	s.peersMu.RUnlock()
 
 	for _, p := range peers {
+		if ready, peerMAC := sess.p2pReadyPeer(); ready && peerMAC == p.mac {
+			continue // self 已与该 peer 直连，无需其候选
+		}
 		list := candidatesFor(receiver, p)
 		if len(list) == 0 {
 			continue
