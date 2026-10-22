@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,6 +77,110 @@ func TestReadAbsorbsKeepaliveProbe(t *testing.T) {
 	}
 	if string(got) != "real-data-after-probe" {
 		t.Fatalf("A read got %q, want data (probe must be absorbed)", got)
+	}
+}
+
+// 回归：P2P 探测包乒乓风暴。
+// 旧实现 Tunnel.Read 收到探测帧会无条件原路回一个探测帧，双方互答回包
+// 形成无速率限制的自激回路（A 回 B -> B 收到又回 A -> ...），实测双向
+// ~27k pps、6µs 背靠背包间隔、99.8% 空转流量。本测试模拟"狂暴对端"
+// （如旧版本节点或异常/恶意来源）向 A 背靠背狂发 400 个探测帧，断言 A
+// 的回复被按来源限速压到个位数，而不是每包必回。
+func TestProbeReplyRateLimited(t *testing.T) {
+	tunA, tunB := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+
+	// A 必须 Read 才会吸收探测帧并（限速）回复。
+	go func() {
+		for {
+			tunA.SetReadDeadline(time.Now().Add(3 * time.Second))
+			if _, err := tunA.Read(); err != nil {
+				return
+			}
+		}
+	}()
+
+	spoof, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("bind spoof: %v", err)
+	}
+	defer spoof.Close()
+	// Addr() 在双栈监听上报 "::"，udp4 socket 无法向其发包；显式构造 IPv4 地址。
+	aAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tunA.Addr().(*net.UDPAddr).Port}
+
+	// 背靠背狂发 400 个探测帧（无等待、无节流），模拟自激/攻击来源。
+	for i := 0; i < 400; i++ {
+		if _, err := spoof.WriteToUDP(probeMagic, aAddr); err != nil {
+			t.Fatalf("spoof write: %v", err)
+		}
+	}
+
+	// 统计 1.5 秒窗口内收到的回复。
+	spoof.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	got := 0
+	buf := make([]byte, 64)
+	for {
+		n, _, err := spoof.ReadFromUDP(buf)
+		if err != nil {
+			break
+		}
+		if n == len(probeMagic) {
+			got++
+		}
+	}
+	// 1.5s 窗口、probeReplyMinInterval=1s：理论上限 ~2；放宽到 4 容忍毛刺，
+	// 但必须远小于 400（否则就是每包必回的风扇）。
+	if got > 4 {
+		t.Fatalf("probe reply storm: got %d replies in 1.5s, want <=4", got)
+	}
+	t.Logf("rate-limited: %d replies for 400 probes", got)
+}
+
+// 回归：keepalive 周期必须是秒级，且本侧有真实数据发送时跳过保活探测。
+// 旧实现 500ms 固定周期叠加乒乓回复，是空转流量的主要来源。
+func TestKeepaliveSlowAndSkippedOnTraffic(t *testing.T) {
+	tunA, tunB := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+
+	// 在 B 侧用计数器收 A 的探测帧：B 的 Read 会吸收它们。
+	probeCount := int32(0)
+	go func() {
+		for {
+			tunB.SetReadDeadline(time.Now().Add(2 * time.Second))
+			frame, err := tunB.Read()
+			if err != nil {
+				return
+			}
+			if isProbe(frame) {
+				atomic.AddInt32(&probeCount, 1)
+			}
+		}
+	}()
+
+	// 持续发送真实数据：有流量时 A 应跳过 keepalive 探测。
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				_ = tunA.Write([]byte("payload"))
+			}
+		}
+	}()
+
+	time.Sleep(3 * time.Second)
+	close(stop)
+
+	// 3 秒内 keepaliveInterval=2s：即便完全不限速也只应发 ~1 个探测；
+	// 有数据发送时还应进一步跳过。给宽松上限 4 防止边界毛刺。
+	if n := atomic.LoadInt32(&probeCount); n > 4 {
+		t.Fatalf("too many keepalive probes during traffic: %d in 3s, want <=4", n)
 	}
 }
 

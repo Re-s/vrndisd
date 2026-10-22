@@ -22,6 +22,22 @@ const maxUDPFrame = 9000
 // 避免把探测帧当作 L2 数据写入 TAP。
 var probeMagic = []byte("vrndis-p2p-probe\x00\x01")
 
+// keepaliveInterval 保活探测发送间隔。
+// 维持 NAT 映射新鲜只需秒级频率（NAT UDP 映射空闲超时通常数十秒）；
+// 过去用 500ms 只会增加无效空转流量。
+const keepaliveInterval = 2 * time.Second
+
+// probeReplyMinInterval 是对同一来源回复探测帧的最小间隔。
+// 隧道建立后 Read 收到对端探测会原路回一个探测帧（供 ping 诊断测直连
+// RTT、并让对端确认本侧存活）。但"收 probe 即回 probe"会让双方互答
+// 回包形成无速率限制的乒乓自激：每收到一个包就触发一个回包，双向
+// 背靠背狂发数万 pps（实测 6µs 包间隔、~27k pps）。按来源地址限速即
+// 可断开自激回路——后到的重复探测不再触发回复。
+const probeReplyMinInterval = time.Second
+
+// probeReplyMaxSources 记录的来源地址上限，避免被扫描来源撑爆内存。
+const probeReplyMaxSources = 64
+
 // isProbe 判断一个数据报是否为打洞/保活探测帧。
 func isProbe(b []byte) bool {
 	return len(b) == len(probeMagic) && string(b) == string(probeMagic)
@@ -49,6 +65,11 @@ type Tunnel struct {
 	// lastTx 记录最近一次发出数据的时间（同锁保护，供本机管理面诊断）。
 	lastTx   time.Time
 	lastTxMu sync.Mutex
+
+	// probeReply 按来源地址记录最近一次回复探测帧的时间，
+	// 用于抑制"收到探测即回复"造成的乒乓自激与反射放大。
+	probeReply   map[string]time.Time
+	probeReplyMu sync.Mutex
 }
 
 // Punch 向 peerCandidates 打洞：持续向候选地址发送探测包，并等待收到对端探测。
@@ -79,7 +100,7 @@ func punchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDP
 	// lastRx  ,
 	//  AttachIdleMonitor
 	//  Read  touchRx  .
-	t := &Tunnel{conn: conn, done: make(chan struct{}), lastRx: time.Now()}
+	t := &Tunnel{conn: conn, done: make(chan struct{}), lastRx: time.Now(), probeReply: make(map[string]time.Time, 8)}
 
 	dbg := log.New(os.Stderr, "punchdbg(local="+conn.LocalAddr().String()+"): ", log.LstdFlags|log.Lmicroseconds)
 	dbg.Printf("start, candidates=%v", peerCandidates)
@@ -153,7 +174,7 @@ func (t *Tunnel) setPeer(from *net.UDPAddr) {
 // 对端仍能收到本侧的探测从而完成双向打通。
 func (t *Tunnel) startKeepalive() {
 	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(keepaliveInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -164,12 +185,35 @@ func (t *Tunnel) startKeepalive() {
 				if peer == nil {
 					continue
 				}
+				// 本侧刚发过真实数据帧时无需再发保活探测：
+				// 数据流量本身就在持续刷新 NAT 映射。
+				if tx := t.LastTxTime(); !tx.IsZero() && time.Since(tx) < keepaliveInterval {
+					continue
+				}
 				t.writeMu.Lock()
 				t.conn.WriteToUDP(probeMagic, peer)
 				t.writeMu.Unlock()
 			}
 		}
 	}()
+}
+
+// shouldReplyProbe 按来源地址对探测回复做速率限制。
+// 距上次向该来源回复不足 probeReplyMinInterval 时不再回复，
+// 断开"回复触发回复"的乒乓自激，同时把无鉴权反射放大的幅度
+// 压到 1 包/秒/来源以下。条目超限时整体重置，避免内存被撑爆。
+func (t *Tunnel) shouldReplyProbe(from *net.UDPAddr) bool {
+	key := from.String()
+	t.probeReplyMu.Lock()
+	defer t.probeReplyMu.Unlock()
+	if len(t.probeReply) > probeReplyMaxSources {
+		t.probeReply = make(map[string]time.Time, 16)
+	}
+	if last, ok := t.probeReply[key]; ok && time.Since(last) < probeReplyMinInterval {
+		return false
+	}
+	t.probeReply[key] = time.Now()
+	return true
 }
 
 func (t *Tunnel) peerAddrOf() *net.UDPAddr {
@@ -192,9 +236,13 @@ func (t *Tunnel) Read() ([]byte, error) {
 		if isProbe(frame) {
 			// disco 响应：对端打洞/保活探测原路回一个 probe，
 			// 供对方 ping 命令测直连 RTT；不污染数据面。
-			t.writeMu.Lock()
-			_, _ = t.conn.WriteToUDP(probeMagic, from)
-			t.writeMu.Unlock()
+			// 回复按来源限速，否则"收 probe 回 probe"会让双方
+			// 互答回包形成乒乓自激（实测 ~27k pps 空转风暴）。
+			if t.shouldReplyProbe(from) {
+				t.writeMu.Lock()
+				_, _ = t.conn.WriteToUDP(probeMagic, from)
+				t.writeMu.Unlock()
+			}
 			continue
 		}
 		return frame, nil
