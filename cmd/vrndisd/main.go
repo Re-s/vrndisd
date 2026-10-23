@@ -1261,8 +1261,22 @@ func localTunnels() map[string]proto.ClientP2PStatus {
 	tunnels := map[string]proto.ClientP2PStatus{}
 	for _, inst := range scanLocalStates() {
 		c := inst.State.Client
-		if inst.State.Role == "client" && c != nil && c.P2P.Active && c.P2P.PeerMAC != "" {
+		if inst.State.Role != "client" || c == nil || !c.P2P.Active {
+			continue
+		}
+		if c.P2P.PeerMAC != "" {
 			tunnels[c.P2P.PeerMAC] = c.P2P
+		}
+		// 多对端隧道：路由表内每个已直连 peer 都按本机隧道处理，
+		// 探测改用该路由的真实 UDP 端点（PeerMAC/Remote 覆盖主隧道值）。
+		for mac, addr := range c.P2P.Routes {
+			if _, ok := tunnels[mac]; ok {
+				continue
+			}
+			st := c.P2P
+			st.PeerMAC = mac
+			st.Remote = addr
+			tunnels[mac] = st
 		}
 	}
 	return tunnels
