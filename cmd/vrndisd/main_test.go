@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"reflect"
 	"testing"
 )
@@ -69,5 +70,49 @@ func TestDefaultConfigPathLinux(t *testing.T) {
 	// 在 Linux 上固定返回 /etc/vrndisd.conf
 	if got := defaultConfigPath(); got != "/etc/vrndisd.conf" {
 		t.Fatalf("defaultConfigPath=%q", got)
+	}
+}
+
+func TestParseLooseUnknownFlagNoPanic(t *testing.T) {
+	// --help 等未注册 flag 不应因 fs.Lookup 返回 nil 而 panic
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("server", "", "")
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("parseLoose panicked: %v", r)
+		}
+	}()
+	pos := parseLoose(fs, []string{"--help", "10.77.0.4"})
+	if len(pos) != 2 || pos[0] != "--help" || pos[1] != "10.77.0.4" {
+		t.Fatalf("positional=%v want [--help 10.77.0.4]", pos)
+	}
+}
+
+func TestParseLoosePositionalBeforeFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	server := fs.String("server", "", "")
+	count := fs.Int("count", 5, "")
+	pos := parseLoose(fs, []string{"10.77.0.4", "--count", "3"})
+	if len(pos) != 1 || pos[0] != "10.77.0.4" {
+		t.Fatalf("positional=%v want [10.77.0.4]", pos)
+	}
+	if *count != 3 {
+		t.Errorf("count=%d want 3", *count)
+	}
+	if *server != "" {
+		t.Errorf("server=%q want empty", *server)
+	}
+}
+
+func TestIsHelpToken(t *testing.T) {
+	for _, a := range []string{"-h", "--help"} {
+		if !isHelpToken(a) {
+			t.Errorf("isHelpToken(%q)=false want true", a)
+		}
+	}
+	for _, a := range []string{"", "-x", "--count", "10.77.0.4"} {
+		if isHelpToken(a) {
+			t.Errorf("isHelpToken(%q)=true want false", a)
+		}
 	}
 }

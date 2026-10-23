@@ -241,6 +241,23 @@ func netcheckDefaultServer() (primary, secondary string, err error) {
 	return net.JoinHostPort(host, "5478"), net.JoinHostPort(host, "5479"), nil
 }
 
+// isHelpToken 判断参数是否为请求帮助。
+func isHelpToken(a string) bool {
+	return a == "-h" || a == "--help"
+}
+
+// handleHelp 若参数含帮助请求，打印用法并返回 true。
+func handleHelp(fs *flag.FlagSet, args []string) bool {
+	for _, a := range args {
+		if isHelpToken(a) {
+			fs.SetOutput(os.Stdout)
+			fs.Usage()
+			return true
+		}
+	}
+	return false
+}
+
 // parseLoose 宽松解析：允许位置参数出现在 flags 之前（如
 // `vrndisd ping 10.77.0.4 --server x`）。逐条消费 flags，返回位置参数。
 func parseLoose(fs *flag.FlagSet, args []string) []string {
@@ -257,6 +274,10 @@ func parseLoose(fs *flag.FlagSet, args []string) []string {
 				continue
 			}
 			fl := fs.Lookup(strings.TrimLeft(a, "-"))
+			if fl == nil { // 未注册 flag（如 --help）：当作位置参数，由调用方决定如何处理
+				positional = append(positional, a)
+				continue
+			}
 			if bf, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
 				_ = fs.Parse([]string{a})
 				continue
@@ -418,6 +439,9 @@ func cmdPing(args []string) error {
 	count := fs.Int("count", 5, "探测次数")
 	wait := fs.Duration("wait", 3*time.Second, "每次探测等待超时")
 	name := fs.String("name", "", "客户端名称（默认 ping，或取自已安装配置）")
+	if handleHelp(fs, args) {
+		return nil
+	}
 	positional := parseLoose(fs, args)
 	target := ""
 	if len(positional) > 0 {
@@ -516,6 +540,9 @@ func cmdPeers(args []string) error {
 	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
 	wait := fs.Duration("wait", 3*time.Second, "每个 peer 探测超时")
 	name := fs.String("name", "", "客户端名称（默认 peers，或取自已安装配置）")
+	if handleHelp(fs, args) {
+		return nil
+	}
 	parseLoose(fs, args)
 	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name)
 	if err != nil {
