@@ -79,22 +79,23 @@ func (s *fakeP2PServer) handleConn(conn net.Conn) {
 	}
 
 	s.mu.Lock()
-	idx := len(s.assigns)
-	s.mu.Unlock()
-	asg := &proto.Assignment{
-		Version:   proto.ProtocolVersion,
-		LeaseID:   uint64(idx + 1),
-		IP:        "10.77.0." + string(rune('2'+idx)),
-		Prefix:    24,
-		Gateway:   "10.77.0.1",
-		DNS:       []string{"8.8.8.8"},
-		MTU:       1500,
-		MAC:       "02:00:00:00:00:0" + string(rune('1'+idx)),
-		ServerMAC: "02:00:00:00:00:00",
-		ServerIP:  "10.77.0.1",
+	asg, ok := s.assigns[hello.Name]
+	if !ok {
+		idx := len(s.assigns)
+		asg = &proto.Assignment{
+			Version:   proto.ProtocolVersion,
+			LeaseID:   uint64(idx + 1),
+			IP:        "10.77.0." + string(rune('2'+idx)),
+			Prefix:    24,
+			Gateway:   "10.77.0.1",
+			DNS:       []string{"8.8.8.8"},
+			MTU:       1500,
+			MAC:       "02:00:00:00:00:0" + string(rune('1'+idx)),
+			ServerMAC: "02:00:00:00:00:00",
+			ServerIP:  "10.77.0.1",
+		}
+		s.assigns[hello.Name] = asg
 	}
-	s.mu.Lock()
-	s.assigns[hello.Name] = asg
 	s.mu.Unlock()
 	_ = proto.WriteMessage(conn, proto.TypeAssign, mustJSON(asg))
 
@@ -376,4 +377,111 @@ func TestP2PConcurrentClients(t *testing.T) {
 	}
 	wg.Wait()
 	t.Logf("4 个并发 P2P 客户端验证通过")
+}
+
+
+// restart 模拟服务器重启：丢弃全部候选登记并断开所有客户端控制连接。
+// assigns 保留（按名字复用），保证重连客户端身份不变。
+func (s *fakeP2PServer) restart(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	for mac, conn := range s.conns {
+		if conn != nil {
+			_ = conn.Close()
+			s.conns[mac] = nil
+		}
+	}
+	s.adv = make(map[string]*proto.P2PAdvertise)
+	s.mu.Unlock()
+}
+
+// 服务器重启后客户端重连时，若 P2P 隧道仍存活，应重播上次上报的候选，
+// 而不是任由服务器候选登记丢失（peers 视图将恒显示 relay）。
+func TestReplaysAdvertiseAfterServerRestart(t *testing.T) {
+	srv := newFakeP2PServer(t)
+	defer srv.Stop()
+
+	stun := stunserver.New(stunserver.Config{ListenAddr: "127.0.0.1:0"})
+	go func() { _ = stun.Start() }()
+	defer stun.Stop()
+	stunAddr := waitStunAddr(stun)
+	if stunAddr == "" {
+		t.Fatal("STUN server did not start")
+	}
+
+	devA := tap.NewFake("c0")
+	devB := tap.NewFake("c1")
+	cA := New(Config{
+		Server:      srv.Addr(),
+		TapName:     "c0",
+		Name:        "alice",
+		P2P:         true,
+		STUNServer:  stunAddr,
+		DialTimeout: 2 * time.Second,
+		Reconnect:   true,
+		Device:      devA,
+	})
+	cB := New(Config{
+		Server:      srv.Addr(),
+		TapName:     "c1",
+		Name:        "bob",
+		P2P:         true,
+		STUNServer:  stunAddr,
+		DialTimeout: 2 * time.Second,
+		Reconnect:   true,
+		Device:      devB,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	go func() { _ = cA.Run(ctx) }()
+	go func() { _ = cB.Run(ctx) }()
+
+	macA := "02:00:00:00:00:01"
+	waitAdv := func() *proto.P2PAdvertise {
+		for i := 0; i < 100; i++ {
+			srv.mu.Lock()
+			adv, ok := srv.adv[macA]
+			srv.mu.Unlock()
+			if ok && adv != nil {
+				return adv
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		return nil
+	}
+
+	advBefore := waitAdv()
+	if advBefore == nil {
+		t.Fatal("客户端未上报候选")
+	}
+	// 等待隧道建立（单客户端无对端时不会打洞）
+	var tunBefore *p2p.Tunnel
+	for i := 0; i < 80 && tunBefore == nil; i++ {
+		tunBefore = cA.getTunnel()
+		if tunBefore == nil {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	if tunBefore == nil {
+		t.Fatal("P2P 隧道未建立")
+	}
+
+	// 模拟重启：候选登记清空、控制连接断开。隧道（纯 UDP）应存活不变。
+	srv.restart(t)
+
+	advAfter := waitAdv()
+	if advAfter == nil {
+		t.Fatal("服务器重启后客户端未重播候选")
+	}
+	if advAfter.Candidate != advBefore.Candidate {
+		t.Fatalf("重播候选变化: before=%s after=%s", advBefore.Candidate, advAfter.Candidate)
+	}
+	tunAfter := cA.getTunnel()
+	if tunAfter == nil {
+		t.Fatal("隧道在服务器重启后丢失")
+	}
+	if tunAfter != tunBefore {
+		t.Fatalf("隧道不应重建: before=%p after=%p", tunBefore, tunAfter)
+	}
 }

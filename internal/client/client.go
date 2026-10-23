@@ -98,13 +98,14 @@ type Client struct {
 
 	// P2P 运行状态
 	p2pMu       sync.Mutex
-	tunnel      *p2p.Tunnel      // 当前 P2P 隧道（nil = 未打通/已回退）
-	peerMAC     net.HardwareAddr // 对端虚拟 MAC
-	peering     bool             // 是否正在打洞中
-	peerCandCh  chan *peerInfo   // 服务器下发的对端候选（仅 P2P）
-	p2pActive   bool             // p2pConnect 运行中标记（事件驱动重启去抖）
-	p2pFailures int              // 连续打洞失败轮数（成功清零）
-	p2pBackoff  time.Time        // 退避结束时刻；早于此后不启动新一轮打洞
+	tunnel      *p2p.Tunnel         // 当前 P2P 隧道（nil = 未打通/已回退）
+	peerMAC     net.HardwareAddr    // 对端虚拟 MAC
+	peering     bool                // 是否正在打洞中
+	peerCandCh  chan *peerInfo      // 服务器下发的对端候选（仅 P2P）
+	p2pActive   bool                // p2pConnect 运行中标记（事件驱动重启去抖）
+	p2pFailures int                 // 连续打洞失败轮数（成功清零）
+	p2pBackoff  time.Time           // 退避结束时刻；早于此后不启动新一轮打洞
+	lastAdv     *proto.P2PAdvertise // 最近一次成功上报的候选（重连时隧道仍存活则重播）
 
 	stopCh    chan struct{}
 	closeOnce sync.Once
@@ -342,7 +343,16 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	// P2P：仅在本轮新连接且尚未有活跃隧道时启动打洞。
 	// TCP 中继始终常驻（devToSock 长期驻留），P2P 只是数据面的加速路径；
 	// 打洞失败或隧道断开时自动回退到 TCP 中继，二层不断连。
-	if c.cfg.P2P && c.tunnel == nil {
+	if c.cfg.P2P && c.hasTunnel() {
+		// 隧道仍存活（典型场景：服务器重启后控制连接重连）。服务器内存中的
+		// 候选登记已随重启丢失，不重报则 peers 视图恒显示 relay、新上线的
+		// 对端也拿不到本机候选。重播上次上报的候选即可恢复，无需重新打洞。
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.replayAdvertise()
+		}()
+	} else if c.cfg.P2P {
 		c.startP2PConnect()
 	}
 
@@ -507,6 +517,32 @@ func (c *Client) tunnelPeerIs(mac net.HardwareAddr) bool {
 		return false
 	}
 	return tun.HasRoute(mac)
+}
+
+// replayAdvertise 在控制连接重连但 P2P 隧道仍存活时，向服务器重播上次
+// 上报的候选。服务器无持久化，重启后候选登记丢失：不重播则管理面 peers
+// 恒显示 relay、新对端无法发现本机。候选与隧道 socket 绑定，复用旧值即可
+// （cone NAT 下映射不变；即使过期，对端隧道仍能从真实数据包学习本机地址）。
+func (c *Client) replayAdvertise() {
+	c.p2pMu.Lock()
+	adv := c.lastAdv
+	c.p2pMu.Unlock()
+	if adv == nil {
+		return
+	}
+	conn := c.currentConn()
+	if conn == nil {
+		return
+	}
+	body, _ := json.Marshal(adv)
+	if err := c.send(conn, proto.TypeP2PAdvertise, body); err != nil {
+		c.logger.Printf("vrndis client: 重连后重播候选失败: %v（隧道不受影响）", err)
+		return
+	}
+	// 同步拉取当前在线候选：现有隧道可按新候选动态注册路由。
+	qbody, _ := json.Marshal(proto.PeerQuery{Version: proto.ProtocolVersion})
+	_ = c.send(conn, proto.TypePeerQuery, qbody)
+	c.logger.Printf("vrndis client: P2P 隧道仍存活，已重播候选 %s（含 %d 条）", adv.Candidate, len(adv.Candidates))
 }
 
 // startP2PConnect 抢占式启动一轮打洞：通过 p2pActive/隧道/退避三重检查后
@@ -749,15 +785,20 @@ func (c *Client) p2pConnect() {
 		c.logger.Printf("vrndis client: 候选多路化: srflx=%s, %d 个额外候选 %v", srflx, extra, advList[1:])
 	}
 
+	adv := &proto.P2PAdvertise{
+		Version:    proto.ProtocolVersion,
+		MAC:        selfMAC,
+		Candidate:  srflx,
+		Candidates: advList,
+	}
 	conn := c.currentConn()
 	if conn != nil {
-		body, _ := json.Marshal(proto.P2PAdvertise{
-			Version:    proto.ProtocolVersion,
-			MAC:        selfMAC,
-			Candidate:  srflx,
-			Candidates: advList,
-		})
-		_ = c.send(conn, proto.TypeP2PAdvertise, body)
+		body, _ := json.Marshal(adv)
+		if err := c.send(conn, proto.TypeP2PAdvertise, body); err == nil {
+			c.p2pMu.Lock()
+			c.lastAdv = adv
+			c.p2pMu.Unlock()
+		}
 	}
 
 	// 2.5) 主动拉取当前在线候选：服务器只在新注册时推送，错过的历史候选
