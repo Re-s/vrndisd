@@ -385,6 +385,9 @@ func (c *Client) managementState() proto.ManagementState {
 			st.P2P.Remote = p.String()
 		}
 		st.P2P.Local = tun.Addr().String()
+		if r := tun.Routes(); len(r) > 0 {
+			st.P2P.Routes = r
+		}
 		if t := tun.LastRxTime(); !t.IsZero() {
 			st.P2P.LastRxAgo = time.Since(t).Round(time.Second).String()
 		}
@@ -497,16 +500,13 @@ func (c *Client) hasTunnel() bool {
 	return tun != nil
 }
 
-// tunnelPeerIs 报告当前 P2P 隧道对端是否为该 MAC（隧道存活时候选无意义）。
+// tunnelPeerIs 报告该 MAC 是否已有 P2P 直连路由（隧道存活时候选无意义）。
 func (c *Client) tunnelPeerIs(mac net.HardwareAddr) bool {
-	c.p2pMu.Lock()
-	tun := c.tunnel
-	pm := c.peerMAC
-	c.p2pMu.Unlock()
-	if tun == nil || pm == nil {
+	tun := c.getTunnel()
+	if tun == nil {
 		return false
 	}
-	return bytes.Equal(pm, mac)
+	return tun.HasRoute(mac)
 }
 
 // startP2PConnect 抢占式启动一轮打洞：通过 p2pActive/隧道/退避三重检查后
@@ -837,6 +837,22 @@ func (c *Client) p2pConnect() {
 		peerMAC = peers[0].MAC
 	}
 	c.setTunnel(tun, peerMAC)
+	// 多对端注册：打洞窗口内回过包的地址都已验证可达（tun.KnownAddr），
+	// 按候选回查其 MAC 注册帧路由，使数据帧能按目的 MAC 直送各自对端，
+	// 而不是只有首个回包的幸运儿独占隧道。
+	routes := 0
+	for _, p := range peers {
+		if p.MAC.String() == selfMAC {
+			continue
+		}
+		for _, a := range p.Addrs {
+			if a != nil && a.Port != 0 && tun.KnownAddr(a) {
+				tun.RegisterRoute(p.MAC, a)
+				routes++
+				break
+			}
+		}
+	}
 	c.resetP2PBackoff()
 	// 通知服务器打洞成功（仅管理面展示用，失败无碍）
 	if conn := c.currentConn(); conn != nil && peerMAC != nil {
@@ -846,7 +862,7 @@ func (c *Client) p2pConnect() {
 		})
 		_ = c.send(conn, proto.TypeP2PReady, body)
 	}
-	c.logger.Printf("vrndis client: P2P 隧道已建立 -> %v", tun.Peer())
+	c.logger.Printf("vrndis client: P2P 隧道已建立 -> %v，直连路由 %d 条", tun.Peer(), routes)
 
 	// 5) 隧道读循环：UDP 隧道 -> 本地网卡；隧道断开（空闲超时或对端关闭）
 	// 时退出，自动回退 TCP 中继（二层不断连）。AttachIdleMonitor 负责空闲检测。
@@ -1139,6 +1155,18 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 					if c.tunnelPeerIs(mac) {
 						break // 已与该 peer 直连：新候选无意义，直接丢弃
 					}
+					// 隧道存活时按候选动态注册直连路由：该 peer 若已被本端
+					// 隧道验证可达（给我们回过包），直接加入路由表，无需
+					// 重建整条隧道（新上线的 peer 也能即时直连）。
+					if tun := c.getTunnel(); tun != nil && !c.isP2PActive() {
+						for _, a := range addrs {
+							if tun.KnownAddr(a) {
+								tun.RegisterRoute(mac, a)
+								c.logger.Printf("vrndis client: P2P 动态注册路由 %s -> %v", mac, a)
+								break
+							}
+						}
+					}
 					select {
 					case c.peerCandCh <- &peerInfo{MAC: mac, Addrs: addrs}:
 					default:
@@ -1169,16 +1197,17 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 func (c *Client) shouldRouteViaP2P(frame []byte) bool {
 	c.p2pMu.Lock()
 	tun := c.tunnel
-	peer := c.peerMAC
 	c.p2pMu.Unlock()
-	if tun == nil || peer == nil {
+	if tun == nil {
 		return false
 	}
 	f, err := ethernet.ParseFrame(frame)
 	if err != nil {
 		return false
 	}
-	return bytes.Equal(f.Dst, peer)
+	// 目的 MAC 有已注册的直连路由才走 P2P；其余一律中继。
+	// 多对端共享一条隧道：缺路由只是"这个 peer 未直连"，不回退整条隧道。
+	return tun.HasRoute(f.Dst)
 }
 
 // tryWriteP2P 尝试通过 P2P 隧道写出一帧。
@@ -1191,14 +1220,21 @@ func (c *Client) tryWriteP2P(frame []byte) bool {
 	if tun == nil {
 		return false
 	}
-	if err := tun.Write(frame); err != nil {
-		// 隧道写入失败：触发回退（清除隧道），后续帧自动走 TCP 中继。
-		// 不回写 TCP 以避免切换瞬间的重复投递与乱序。
-		c.logger.Printf("vrndis client: P2P 隧道写入失败: %v，回退 TCP 中继", err)
-		c.clearTunnel()
-		if tun != nil {
-			_ = tun.Close()
-		}
+	err := tun.Write(frame)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, p2p.ErrNoRoute) {
+		// 该目的 MAC 没有直连路由（对端未打洞成功/候选未回包）：
+		// 改走 TCP 中继，隧道与其他已直连对端不受影响。
+		return false
+	}
+	// 真实写入失败：触发回退（清除隧道），后续帧自动走 TCP 中继。
+	// 不回写 TCP 以避免切换瞬间的重复投递与乱序。
+	c.logger.Printf("vrndis client: P2P 隧道写入失败: %v，回退 TCP 中继", err)
+	c.clearTunnel()
+	if tun != nil {
+		_ = tun.Close()
 	}
 	return true
 }

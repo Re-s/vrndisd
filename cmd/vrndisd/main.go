@@ -1260,6 +1260,9 @@ func printInstance(addr string, state *proto.ManagementState) {
 				if c.P2P.Remote != "" {
 					p2p += " @ " + c.P2P.Remote
 				}
+				if n := len(c.P2P.Routes); n > 1 {
+					p2p += fmt.Sprintf("（共 %d 条直连路由）", n)
+				}
 				var ago []string
 				if c.P2P.LastRxAgo != "" {
 					ago = append(ago, "rx "+c.P2P.LastRxAgo)

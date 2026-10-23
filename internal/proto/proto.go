@@ -189,14 +189,15 @@ type ClientStatus struct {
 
 // ClientP2PStatus P2P 直连状态（诊断打洞失败 / 隧道空闲关闭用）。
 type ClientP2PStatus struct {
-	Enabled   bool   `json:"enabled"`
-	Active    bool   `json:"active"`                // 隧道存活
-	PeerMAC   string `json:"peer_mac,omitempty"`    // 对端虚拟 MAC
-	Local     string `json:"local,omitempty"`       // 本端 UDP 地址
-	Remote    string `json:"remote,omitempty"`      // 对端 UDP 地址
-	LastRxAgo string `json:"last_rx_ago,omitempty"` // 距上次收到数据
-	LastTxAgo string `json:"last_tx_ago,omitempty"` // 距上次发出数据
-	LastFail  string `json:"last_fail,omitempty"`   // 上一轮打洞失败原因
+	Enabled   bool              `json:"enabled"`
+	Active    bool              `json:"active"`                // 隧道存活
+	PeerMAC   string            `json:"peer_mac,omitempty"`    // 对端虚拟 MAC
+	Local     string            `json:"local,omitempty"`       // 本端 UDP 地址
+	Remote    string            `json:"remote,omitempty"`      // 对端 UDP 地址
+	LastRxAgo string            `json:"last_rx_ago,omitempty"` // 距上次收到数据
+	LastTxAgo string            `json:"last_tx_ago,omitempty"` // 距上次发出数据
+	LastFail  string            `json:"last_fail,omitempty"`   // 上一轮打洞失败原因
+	Routes    map[string]string `json:"routes,omitempty"`      // 已直连对端 MAC -> UDP 地址
 }
 
 // CustomClientInfo for JSON

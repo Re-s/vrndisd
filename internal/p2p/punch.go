@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"vrndis/internal/ethernet"
 )
 
 var errNoXORAddr = errors.New("vrndis/p2p: bad XOR-MAPPED-ADDRESS")
@@ -38,14 +40,33 @@ const probeReplyMinInterval = time.Second
 // probeReplyMaxSources 记录的来源地址上限，避免被扫描来源撑爆内存。
 const probeReplyMaxSources = 64
 
+// maxPeers 已验证对端地址上限（同上，防扫描来源撑爆保活目标集）。
+const maxPeers = 64
+
+// punchCollectWindow 首个对端回包后继续收集其余对端的时间窗口。
+// 过短会漏掉回包较慢（CGNAT 丢包重传、跨洲链路）的对端，使"能直连
+// 的 peer 只有第一个连上隧道"退化回单对端行为；过长则延迟首条隧道
+// 可用。2.5s 覆盖一轮 100ms 探测重发 + 一次丢包重传。
+const punchCollectWindow = 2500 * time.Millisecond
+
+// ErrNoRoute 帧的目的 MAC 没有已注册的直连路由。
+// 调用方应改走 TCP 中继；这只是一个对端未直连，隧道本身与其他对端不受影响。
+var ErrNoRoute = errors.New("vrndis/p2p: no direct route for destination MAC")
+
 // isProbe 判断一个数据报是否为打洞/保活探测帧。
 func isProbe(b []byte) bool {
 	return len(b) == len(probeMagic) && string(b) == string(probeMagic)
 }
 
-// Tunnel 一个已打穿的双向 UDP 隧道。
+// Tunnel 一个已打通的 UDP 隧道，用同一个 socket 服务多个对端。
 //
-// 对端地址取最后一次从候选集中收到数据报的来源（即对端实际公网映射）。
+// UDP 无连接：一个 socket 可同时与任意多对端通信。打洞窗口内收到的
+// 所有来源都进入 addrs（已验证可达——能给我们发包的地址必然能回包），
+// 调用方按候选把对端 MAC 注册进 routes 后，数据帧按目的 MAC 直送
+// 对应对端。由此摆脱"单隧道单对端"限制：ping 任何已打通的 peer 都
+// 走直连，而不是只有一个先回包的幸运儿独占隧道。
+//
+// 主对端取打洞窗口内首个回包来源（peerAddr，兼容旧 API 与管理面诊断）。
 // 提供与 tap.Device 类似的 Read/Write 语义，可替换服务器中继数据面。
 type Tunnel struct {
 	conn *net.UDPConn
@@ -53,9 +74,12 @@ type Tunnel struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	writeMu  sync.Mutex
+	writeMu sync.Mutex
+
 	mu       sync.Mutex
-	peerAddr *net.UDPAddr
+	peerAddr *net.UDPAddr            // 首个打通的对端（兼容旧 API/管理面诊断）
+	routes   map[string]*net.UDPAddr // MAC 字符串 -> 对端地址（数据帧路由）
+	addrs    map[string]*net.UDPAddr // 已验证可达对端地址集（keepalive 目标，收包即学习）
 
 	// lastRx 记录最近一次收到数据的时间（受 lastRxMu 保护），
 	// 供 AttachIdleMonitor 轮询判断隧道是否空闲；不要再读 socket。
@@ -84,23 +108,31 @@ func Punch(ctx context.Context, localPort int, peerCandidates []*net.UDPAddr) (*
 	return punchConn(ctx, conn, peerCandidates)
 }
 
-// punchConn 在已绑定的 UDP 连接上打洞。conn 交由 Tunnel 持有，打通后由调用方关闭。
+// PunchConn 在已绑定的 UDP 连接上打洞。conn 交由 Tunnel 持有，打通后由调用方关闭。
 // 供测试在并发场景下显式绑定端口、避免端口复用竞态。
-// PunchConn  UDP conn(STUN Discover )
 //
-//	Tunnel ;ctx  ErrPunchTimeout
-//
-// ,conn ;,
-// ctx ,conn.Close()
+// 打洞窗口：首个对端回包后并不立即返回，而是继续收集 punchCollectWindow
+// 时间内的其余回包来源，让一条隧道同时携带多个对端。
 func PunchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDPAddr) (*Tunnel, error) {
 	return punchConn(ctx, conn, peerCandidates)
 }
 
 func punchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDPAddr) (*Tunnel, error) {
-	// lastRx  ,
-	//  AttachIdleMonitor
-	//  Read  touchRx  .
-	t := &Tunnel{conn: conn, done: make(chan struct{}), lastRx: time.Now(), probeReply: make(map[string]time.Time, 8)}
+	return punchConnWindow(ctx, conn, peerCandidates, punchCollectWindow)
+}
+
+// punchConnWindow 是 punchConn 的可参数化实现（collectWindow 供测试调小，
+// 避免每个用例空等 2.5 秒）。
+func punchConnWindow(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDPAddr, collectWindow time.Duration) (*Tunnel, error) {
+	// lastRx 供 AttachIdleMonitor 判断空闲（真正的刷新由 Tunnel.Read 的 touchRx 完成）。
+	t := &Tunnel{
+		conn:       conn,
+		done:       make(chan struct{}),
+		lastRx:     time.Now(),
+		routes:     make(map[string]*net.UDPAddr),
+		addrs:      make(map[string]*net.UDPAddr, 8),
+		probeReply: make(map[string]time.Time, 8),
+	}
 
 	dbg := log.New(os.Stderr, "punchdbg(local="+conn.LocalAddr().String()+"): ", log.LstdFlags|log.Lmicroseconds)
 	dbg.Printf("start, candidates=%v", peerCandidates)
@@ -108,15 +140,34 @@ func punchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDP
 	sentOnce := false
 	// 立即发一轮探测：避免等待首个 ticker（100ms）期间收到对端探测
 	// 却因 sentOnce=false 被丢弃，造成双方互丢的活锁。
-	for _, cand := range peerCandidates {
-		if cand == nil {
-			continue
-		}
-		if _, werr := conn.WriteToUDP(probeMagic, cand); werr == nil {
-			sentOnce = true
+	sendProbe := func() {
+		for _, cand := range peerCandidates {
+			if cand == nil {
+				continue
+			}
+			if _, werr := conn.WriteToUDP(probeMagic, cand); werr == nil {
+				sentOnce = true
+			}
 		}
 	}
-	// 持续向候选地址发探测（间隔可控），直到打通或 ctx 结束。
+	sendProbe()
+
+	// 首个对端回包后启动收集窗口：窗口到期且已有主对端即返回 Tunnel。
+	collectFired := make(chan struct{}, 1)
+	var collectStarted bool
+	startCollect := func() {
+		if collectStarted {
+			return
+		}
+		collectStarted = true
+		time.AfterFunc(collectWindow, func() {
+			select {
+			case collectFired <- struct{}{}:
+			default:
+			}
+		})
+	}
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -125,14 +176,14 @@ func punchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDP
 			conn.Close()
 			return nil, ErrPunchTimeout
 		case <-ticker.C:
-			for _, cand := range peerCandidates {
-				if cand == nil {
-					continue
-				}
-				if _, werr := conn.WriteToUDP(probeMagic, cand); werr == nil {
-					sentOnce = true
-				}
-			}
+			sendProbe()
+		case <-collectFired:
+			// 收集窗口结束：以首个对端为主对端建立隧道。窗口到期时
+			// peerAddr 必然非空（startCollect 仅在 setPeer 后调用）。
+			_ = conn.SetReadDeadline(time.Time{})
+			dbg.Printf("OK primary=%v, collected %d peers total", t.peerAddr, len(t.addrs))
+			t.startKeepalive()
+			return t, nil
 		default:
 		}
 		// 轮询读取：一帧即确认打通。
@@ -153,13 +204,13 @@ func punchConn(ctx context.Context, conn *net.UDPConn, peerCandidates []*net.UDP
 			dbg.Printf("dropping packet: sentOnce=false")
 			continue
 		}
-		t.setPeer(from)
-		t.startKeepalive()
-		dbg.Printf("OK peer=%v", from)
-		//  punch  50ms  deadline,
-		//  deadline  Tunnel.Read  EOF.
-		_ = conn.SetReadDeadline(time.Time{})
-		return t, nil
+		if t.peerAddr == nil {
+			t.setPeer(from)
+			dbg.Printf("primary peer=%v", from)
+			startCollect()
+		}
+		// 任何来源都记为可达：它给我们发了包，我们必能回包给它。
+		t.addPeer(from)
 	}
 }
 
@@ -169,7 +220,87 @@ func (t *Tunnel) setPeer(from *net.UDPAddr) {
 	t.mu.Unlock()
 }
 
-// startKeepalive 起一个保活发送器：隧道存活期间周期向对端发探测包。
+// addPeer 记录一个已验证可达的对端地址（收包来源必然可达）。
+// 超过上限时整体重置（防扫描来源撑爆保活目标集），返回是否新增。
+func (t *Tunnel) addPeer(from *net.UDPAddr) bool {
+	if from == nil {
+		return false
+	}
+	key := from.String()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.addrs) > maxPeers {
+		t.addrs = make(map[string]*net.UDPAddr, 16)
+	}
+	if _, ok := t.addrs[key]; ok {
+		return false
+	}
+	addr := *from
+	t.addrs[key] = &addr
+	return true
+}
+
+// RegisterRoute 注册"目的 MAC -> 对端地址"的帧路由。
+// 调用方（client）在打洞成功后按候选回查每个对端的 MAC 逐个注册，
+// 使数据帧能按目的 MAC 直送对应对端。
+func (t *Tunnel) RegisterRoute(mac net.HardwareAddr, addr *net.UDPAddr) {
+	if mac == nil || addr == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.routes == nil {
+		t.routes = make(map[string]*net.UDPAddr)
+	}
+	a := *addr
+	t.routes[mac.String()] = &a
+}
+
+// KnownAddr 该地址是否已验证可达（收到过它的包）。
+func (t *Tunnel) KnownAddr(addr *net.UDPAddr) bool {
+	if addr == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.addrs[addr.String()]
+	return ok
+}
+
+// HasRoute 是否存在该目的 MAC 的直连路由。
+func (t *Tunnel) HasRoute(mac net.HardwareAddr) bool {
+	if mac == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.routes[mac.String()]
+	return ok
+}
+
+// Routes 返回 MAC -> 地址 的路由快照（管理面诊断用）。
+func (t *Tunnel) Routes() map[string]string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]string, len(t.routes))
+	for k, v := range t.routes {
+		out[k] = v.String()
+	}
+	return out
+}
+
+// Peers 返回全部已验证对端地址快照（管理面诊断与保活用）。
+func (t *Tunnel) Peers() []*net.UDPAddr {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]*net.UDPAddr, 0, len(t.addrs))
+	for _, v := range t.addrs {
+		out = append(out, v)
+	}
+	return out
+}
+
+// startKeepalive 起一个保活发送器：隧道存活期间周期向全部已验证对端发探测包。
 // 既维持 NAT 映射新鲜度，也保证"先收到对端探测"一侧在停发后，
 // 对端仍能收到本侧的探测从而完成双向打通。
 func (t *Tunnel) startKeepalive() {
@@ -181,18 +312,16 @@ func (t *Tunnel) startKeepalive() {
 			case <-t.done:
 				return
 			case <-ticker.C:
-				peer := t.Peer()
-				if peer == nil {
-					continue
-				}
 				// 本侧刚发过真实数据帧时无需再发保活探测：
 				// 数据流量本身就在持续刷新 NAT 映射。
 				if tx := t.LastTxTime(); !tx.IsZero() && time.Since(tx) < keepaliveInterval {
 					continue
 				}
-				t.writeMu.Lock()
-				t.conn.WriteToUDP(probeMagic, peer)
-				t.writeMu.Unlock()
+				for _, peer := range t.Peers() {
+					t.writeMu.Lock()
+					t.conn.WriteToUDP(probeMagic, peer)
+					t.writeMu.Unlock()
+				}
 			}
 		}
 	}()
@@ -223,7 +352,8 @@ func (t *Tunnel) peerAddrOf() *net.UDPAddr {
 }
 
 // Read 读取一个数据帧（阻塞）。隧道未打通或已关闭时返回错误。
-// 保活探测帧会被吸收（跳过），不会作为 L2 数据返回。
+// 保活探测帧会被吸收（跳过），不会作为 L2 数据返回；
+// 任何收包来源都会被记为可达对端（addrs），供保活与路由学习。
 func (t *Tunnel) Read() ([]byte, error) {
 	for {
 		buf := make([]byte, maxUDPFrame)
@@ -233,6 +363,7 @@ func (t *Tunnel) Read() ([]byte, error) {
 			return nil, err
 		}
 		frame := buf[:n]
+		t.addPeer(from)
 		if isProbe(frame) {
 			// disco 响应：对端打洞/保活探测原路回一个 probe，
 			// 供对方 ping 命令测直连 RTT；不污染数据面。
@@ -250,7 +381,11 @@ func (t *Tunnel) Read() ([]byte, error) {
 }
 
 // SetReadDeadline 设置后续 Read 的截止时间（用于测试与超时控制）。
-// touchRx  Read
+func (t *Tunnel) SetReadDeadline(dl time.Time) error {
+	return t.conn.SetReadDeadline(dl)
+}
+
+// touchRx 在 Read 收包时刷新最近收包时间（供空闲监测）。
 func (t *Tunnel) touchRx() {
 	t.lastRxMu.Lock()
 	t.lastRx = time.Now()
@@ -277,22 +412,26 @@ func (t *Tunnel) LastTxTime() time.Time {
 	return t.lastTx
 }
 
-func (t *Tunnel) SetReadDeadline(dl time.Time) error {
-	return t.conn.SetReadDeadline(dl)
-}
-
-// Write 发送一个数据帧到对端（未设置对端时错误）。
+// Write 按帧目的 MAC 路由发送数据帧。
+// 未注册该 MAC 的直连路由时返回 ErrNoRoute——调用方应改走 TCP 中继，
+// 且不必断开隧道（其余对端不受影响）。
 func (t *Tunnel) Write(frame []byte) error {
-	peer := t.peerAddrOf()
-	if peer == nil {
-		return errors.New("vrndis/p2p: no peer set")
+	f, err := ethernet.ParseFrame(frame)
+	if err != nil {
+		return fmt.Errorf("vrndis/p2p: bad frame: %w", err)
+	}
+	t.mu.Lock()
+	addr, ok := t.routes[f.Dst.String()]
+	t.mu.Unlock()
+	if !ok {
+		return ErrNoRoute
 	}
 	if len(frame) > maxUDPFrame {
 		return errors.New("vrndis/p2p: frame too large")
 	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	_, err := t.conn.WriteToUDP(frame, peer)
+	_, err = t.conn.WriteToUDP(frame, addr)
 	if err == nil {
 		t.touchTx()
 	}
@@ -302,7 +441,7 @@ func (t *Tunnel) Write(frame []byte) error {
 // Addr 返回本地 UDP 地址。
 func (t *Tunnel) Addr() net.Addr { return t.conn.LocalAddr() }
 
-// Peer 返回当前对端地址。
+// Peer 返回当前主对端地址（打洞窗口内首个回包来源）。
 func (t *Tunnel) Peer() *net.UDPAddr { return t.peerAddrOf() }
 
 // Close 关闭隧道并释放 UDP 连接。可重复调用。
@@ -316,12 +455,8 @@ func (t *Tunnel) Done() <-chan struct{} { return t.done }
 
 // AttachIdleMonitor 起一个空闲监视：超过 idle 未收到任何数据报则关闭隧道并返回 ErrIdleTimeout。
 // 返回的 cancel 可停止监视器。用于把打穿但失活的隧道回退到服务器中继。
-// AttachIdleMonitor : idle  ErrIdleTimeout
-//
-//	cancel
-//
-//	lastRx ( Tunnel.Read ),
-//	ReadFromUDP : Tunnel.Read
+// 空闲判定基于任意对端的最近收包时间：只要还有一个对端在通信，整条
+// 隧道（共享 socket）就保持存活。
 func (t *Tunnel) AttachIdleMonitor(idle time.Duration, logger *log.Logger) (cancel func()) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)

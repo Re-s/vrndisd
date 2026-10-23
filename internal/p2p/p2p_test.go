@@ -1,15 +1,19 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
+
 	"time"
+	"vrndis/internal/ethernet"
 
 	stunserver "vrndis/internal/stun/server"
 )
@@ -25,7 +29,7 @@ func mustUDPAddr(t *testing.T, host string, port int) *net.UDPAddr {
 
 // 两个对端同时打洞：都应成功，随后可双向传帧。
 func TestPunchBidirectional(t *testing.T) {
-	tunA, tunB := punchPair(t)
+	tunA, tunB, macA, macB := punchPair(t)
 	defer tunA.Close()
 	defer tunB.Close()
 
@@ -33,41 +37,64 @@ func TestPunchBidirectional(t *testing.T) {
 		t.Fatal("tunnel has no peer")
 	}
 
-	// 双向传帧。
-	if err := tunA.Write([]byte("ping-from-A")); err != nil {
-		t.Fatalf("A write: %v", err)
+	// 双向传帧（按目的 MAC 路由）。
+	send := func(tun *Tunnel, dst, src net.HardwareAddr, payload string) []byte {
+		t.Helper()
+		frame := ethernet.BuildFrame(dst, src, ethernet.TypeIPv4, []byte(payload))
+		if err := tun.Write(frame); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		return frame
 	}
+	frameA := send(tunA, macB, macA, "ping-from-A")
 	tunB.SetReadDeadline(time.Now().Add(1 * time.Second))
 	gotB, err := tunB.Read()
-	if err != nil || string(gotB) != "ping-from-A" {
-		t.Fatalf("B read: %v %q", err, gotB)
+	if err != nil {
+		t.Fatalf("B read: %v", err)
 	}
-	if err := tunB.Write([]byte("pong-from-B")); err != nil {
+	if !bytes.Equal(gotB, frameA) {
+		t.Fatalf("B read %v, want frame %v", gotB, frameA)
+	}
+	frameB := ethernet.BuildFrame(macA, macB, ethernet.TypeIPv4, []byte("pong-from-B"))
+	if err := tunB.Write(frameB); err != nil {
 		t.Fatalf("B write: %v", err)
 	}
 	tunA.SetReadDeadline(time.Now().Add(1 * time.Second))
 	gotA, err := tunA.Read()
-	if err != nil || string(gotA) != "pong-from-B" {
-		t.Fatalf("A read: %v %q", err, gotA)
+	if err != nil {
+		t.Fatalf("A read: %v", err)
+	}
+	if !bytes.Equal(gotA, frameB) {
+		t.Fatalf("A read %v, want frame %v", gotA, frameB)
 	}
 }
 
 // 保活探测帧必须被数据面 Read 吸收，不污染 L2 数据流。
 // 回归：此前 keepalive 探测与数据共用同一 socket，读到的真实数据帧之前可能先读到对端保活探测。
 func TestReadAbsorbsKeepaliveProbe(t *testing.T) {
-	tunA, tunB := punchPair(t)
+	tunA, tunB, _, _ := punchPair(t)
 	defer tunA.Close()
 	defer tunB.Close()
 
-	// 手动向 A 注入一个保活探测帧（等价于 B 的 keepalive 发出，但直接从 B 发）
-	// 以确定 A 的 Read 会跳过它并返回随后到来的真实数据。
-	if err := tunB.Write(probeMagic); err != nil {
-		t.Fatalf("B write probe: %v", err)
+	// 用独立 socket 模拟对端直接向 A 的隧道端口注入：
+	// 先一个保活探测帧，随后一个真实以太网帧。
+	src, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("bind src: %v", err)
+	}
+	defer src.Close()
+	aAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tunA.Addr().(*net.UDPAddr).Port}
+
+	if _, err := src.WriteToUDP(probeMagic, aAddr); err != nil {
+		t.Fatalf("src write probe: %v", err)
 	}
 	// 确保探测帧先于数据帧到达 A。
 	time.Sleep(50 * time.Millisecond)
-	if err := tunB.Write([]byte("real-data-after-probe")); err != nil {
-		t.Fatalf("B write data: %v", err)
+	frame := ethernet.BuildFrame(net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x99},
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x98}, ethernet.TypeIPv4,
+		[]byte("real-data-after-probe"))
+	if _, err := src.WriteToUDP(frame, aAddr); err != nil {
+		t.Fatalf("src write data: %v", err)
 	}
 
 	tunA.SetReadDeadline(time.Now().Add(1 * time.Second))
@@ -75,8 +102,8 @@ func TestReadAbsorbsKeepaliveProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("A read: %v", err)
 	}
-	if string(got) != "real-data-after-probe" {
-		t.Fatalf("A read got %q, want data (probe must be absorbed)", got)
+	if !bytes.Equal(got, frame) {
+		t.Fatalf("A read %v, want data frame (probe must be absorbed)", got)
 	}
 }
 
@@ -87,7 +114,7 @@ func TestReadAbsorbsKeepaliveProbe(t *testing.T) {
 // （如旧版本节点或异常/恶意来源）向 A 背靠背狂发 400 个探测帧，断言 A
 // 的回复被按来源限速压到个位数，而不是每包必回。
 func TestProbeReplyRateLimited(t *testing.T) {
-	tunA, tunB := punchPair(t)
+	tunA, tunB, _, _ := punchPair(t)
 	defer tunA.Close()
 	defer tunB.Close()
 
@@ -140,7 +167,7 @@ func TestProbeReplyRateLimited(t *testing.T) {
 // 回归：keepalive 周期必须是秒级，且本侧有真实数据发送时跳过保活探测。
 // 旧实现 500ms 固定周期叠加乒乓回复，是空转流量的主要来源。
 func TestKeepaliveSlowAndSkippedOnTraffic(t *testing.T) {
-	tunA, tunB := punchPair(t)
+	tunA, tunB, macA, macB := punchPair(t)
 	defer tunA.Close()
 	defer tunB.Close()
 
@@ -169,7 +196,8 @@ func TestKeepaliveSlowAndSkippedOnTraffic(t *testing.T) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				_ = tunA.Write([]byte("payload"))
+				frame := ethernet.BuildFrame(macB, macA, ethernet.TypeIPv4, []byte("payload"))
+				_ = tunA.Write(frame)
 			}
 		}
 	}()
@@ -181,6 +209,92 @@ func TestKeepaliveSlowAndSkippedOnTraffic(t *testing.T) {
 	// 有数据发送时还应进一步跳过。给宽松上限 4 防止边界毛刺。
 	if n := atomic.LoadInt32(&probeCount); n > 4 {
 		t.Fatalf("too many keepalive probes during traffic: %d in 3s, want <=4", n)
+	}
+}
+
+// 打洞收集窗口内所有回包对端都应被收录进同一条隧道（单 socket 多对端）。
+// 回归此前"首个回包者独占隧道、其余能直连的 peer 也被迫走中继"的问题。
+func TestPunchCollectsMultiplePeers(t *testing.T) {
+
+	conns := make([]*net.UDPConn, 3)
+	for i := range conns {
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if err != nil {
+			t.Fatalf("bind %d: %v", i, err)
+		}
+		defer c.Close()
+		conns[i] = c
+	}
+	x, y, z := conns[0], conns[1], conns[2]
+
+	// Y、Z 收到 X 的探测后原路回一个探测（模拟真实对端的打洞应答）。
+	echo := func(c *net.UDPConn) {
+		go func() {
+			buf := make([]byte, 64)
+			for {
+				_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				_, from, err := c.ReadFromUDP(buf)
+				if err != nil {
+					return
+				}
+				_, _ = c.WriteToUDP(probeMagic, from)
+			}
+		}()
+	}
+	echo(y)
+	echo(z)
+
+	cands := []*net.UDPAddr{
+		{IP: net.IPv4(127, 0, 0, 1), Port: y.LocalAddr().(*net.UDPAddr).Port},
+		{IP: net.IPv4(127, 0, 0, 1), Port: z.LocalAddr().(*net.UDPAddr).Port},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tun, err := punchConnWindow(ctx, x, cands, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("punch: %v", err)
+	}
+	defer tun.Close()
+
+	peers := tun.Peers()
+	if len(peers) < 2 {
+		t.Fatalf("want >=2 collected peers, got %d: %v", len(peers), peers)
+	}
+	known := map[string]bool{}
+	for _, a := range peers {
+		known[a.String()] = true
+	}
+	for _, want := range []string{cands[0].String(), cands[1].String()} {
+		if !known[want] {
+			t.Fatalf("collected peers %v missing %s", peers, want)
+		}
+	}
+}
+
+// 数据帧按目的 MAC 路由到对应对端；未注册 MAC 返回 ErrNoRoute 且不影响隧道与其他对端。
+func TestWriteRoutesByDestinationMAC(t *testing.T) {
+	tunA, tunB, macA, macB := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+
+	// 未注册的目的 MAC：ErrNoRoute，且隧道不被回退（Peer/knowAddr 仍可用）。
+	unknown := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0xEE}
+	frame := ethernet.BuildFrame(unknown, macA, ethernet.TypeIPv4, []byte("to-unknown"))
+	if err := tunA.Write(frame); !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("want ErrNoRoute, got %v", err)
+	}
+	// 隧道仍然存活：B 可正常收到 A 发给 B 的帧。
+	payload := ethernet.BuildFrame(macB, macA, ethernet.TypeIPv4, []byte("hello-mac-route"))
+	if err := tunA.Write(payload); err != nil {
+		t.Fatalf("A write: %v", err)
+	}
+	tunB.SetReadDeadline(time.Now().Add(1 * time.Second))
+	got, err := tunB.Read()
+	if err != nil {
+		t.Fatalf("B read: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("B read %v, want %v", got, payload)
 	}
 }
 
@@ -200,7 +314,7 @@ func TestPunchTimeoutFallsBack(t *testing.T) {
 
 // 打洞成功后空闲超时回退。
 func TestTunnelIdleTimeout(t *testing.T) {
-	tunA, tunB := punchPair(t)
+	tunA, tunB, _, _ := punchPair(t)
 	defer tunA.Close()
 	defer tunB.Close()
 
@@ -220,7 +334,7 @@ func TestPunchConcurrentPairs(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a, b := punchPair(t)
+			a, b, _, _ := punchPair(t)
 			a.Close()
 			b.Close()
 		}()
@@ -239,7 +353,9 @@ func TestPunchNoCandidates(t *testing.T) {
 
 // 建两两打洞的隧道对，供子测试复用。
 // 显式绑定两个 UDP 连接（取实际端口）再打洞，避免并发场景下 freeUDPPort 的端口复用竞态。
-func punchPair(t *testing.T) (*Tunnel, *Tunnel) {
+// 返回 (tunA, tunB, macA, macB) 并预注册双向帧路由：p2p 层测试只关心
+// UDP 路径，MAC 用约定的测试值；client 层的"候选回查注册"在 client 自己的测试里覆盖。
+func punchPair(t *testing.T) (*Tunnel, *Tunnel, net.HardwareAddr, net.HardwareAddr) {
 	t.Helper()
 	connA, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
@@ -264,11 +380,11 @@ func punchPair(t *testing.T) (*Tunnel, *Tunnel) {
 	}
 	results := make(chan res, 2)
 	go func() {
-		tun, err := punchConn(ctxA, connA, []*net.UDPAddr{mustUDPAddr(t, "127.0.0.1", bport)})
+		tun, err := punchConnWindow(ctxA, connA, []*net.UDPAddr{mustUDPAddr(t, "127.0.0.1", bport)}, 100*time.Millisecond)
 		results <- res{tun, err}
 	}()
 	go func() {
-		tun, err := punchConn(ctxB, connB, []*net.UDPAddr{mustUDPAddr(t, "127.0.0.1", aport)})
+		tun, err := punchConnWindow(ctxB, connB, []*net.UDPAddr{mustUDPAddr(t, "127.0.0.1", aport)}, 100*time.Millisecond)
 		results <- res{tun, err}
 	}()
 	ra := <-results
@@ -279,7 +395,11 @@ func punchPair(t *testing.T) (*Tunnel, *Tunnel) {
 	if rb.err != nil {
 		t.Fatalf("B punch: %v", rb.err)
 	}
-	return ra.tun, rb.tun
+	macA := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0xaa, 0x01}
+	macB := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0xaa, 0x02}
+	ra.tun.RegisterRoute(macB, ra.tun.Peer()) // A -> B：A 学到的 B 地址
+	rb.tun.RegisterRoute(macA, rb.tun.Peer()) // B -> A：B 学到的 A 地址
+	return ra.tun, rb.tun, macA, macB
 }
 
 // Discover 对真实 STUN 服务器探测，应返回非空公网地址。

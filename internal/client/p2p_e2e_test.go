@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -175,6 +176,23 @@ func peerCandidateMsg(adv *proto.P2PAdvertise, dstMAC string) proto.PeerCandidat
 }
 
 // 两个真实客户端 + fake TCP 服务器 + 真实 STUN 服务器 + 回环 UDP 打洞
+// peerMAC 从隧道已注册路由中取一个对端 MAC（client 完成候选回查后注册）。
+func peerMAC(t *testing.T, tun *p2p.Tunnel) net.HardwareAddr {
+	t.Helper()
+	for mac := range tun.Routes() {
+		if m, err := net.ParseMAC(mac); err == nil {
+			return m
+		}
+	}
+	t.Fatal("隧道未注册任何直连路由")
+	return nil
+}
+
+func srcMAC(name string) net.HardwareAddr {
+	// src 不参与路由判定，任意合法单播 MAC 即可。
+	return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+}
+
 func TestP2PRealTunnelOnLoopback(t *testing.T) {
 	srv := newFakeP2PServer(t)
 	defer srv.Stop()
@@ -232,21 +250,24 @@ func TestP2PRealTunnelOnLoopback(t *testing.T) {
 			tunA != nil, tunB != nil, cA.getPeerMAC(), cB.getPeerMAC())
 	}
 
-	// 双向传帧（真实 UDP 隧道，非 TCP 中继）
-	if err := tunA.Write([]byte("ping-from-alice")); err != nil {
-		t.Fatalf("A write: %v", err)
+	// 双向传帧（真实 UDP 隧道，非 TCP 中继）。
+	// dst 取隧道已注册的对端 MAC，src 取各 client 自己的 TAP MAC。
+	sendOverTunnel := func(tun *p2p.Tunnel, dstMAC net.HardwareAddr, payload string) []byte {
+		frame := ethernet.BuildFrame(dstMAC, srcMAC(""), ethernet.TypeIPv4, []byte(payload))
+		if err := tun.Write(frame); err != nil {
+			t.Fatalf("tunnel write: %v", err)
+		}
+		return frame
 	}
+	wantA := sendOverTunnel(tunA, peerMAC(t, tunA), "ping-from-alice")
 	frame, err := devB.Capture()
-	if err != nil || string(frame) != "ping-from-alice" {
-		t.Fatalf("B read: %v %q", err, frame)
+	if err != nil || !bytes.Equal(frame, wantA) {
+		t.Fatalf("B read: %v %v", err, frame)
 	}
-
-	if err := tunB.Write([]byte("pong-from-bob")); err != nil {
-		t.Fatalf("B write: %v", err)
-	}
+	wantB := sendOverTunnel(tunB, peerMAC(t, tunB), "pong-from-bob")
 	frame, err = devA.Capture()
-	if err != nil || string(frame) != "pong-from-bob" {
-		t.Fatalf("A read: %v %q", err, frame)
+	if err != nil || !bytes.Equal(frame, wantB) {
+		t.Fatalf("A read: %v %v", err, frame)
 	}
 
 	t.Logf("P2P 回环直连验证通过: A tunnel=%v B tunnel=%v", tunA.Peer(), tunB.Peer())
