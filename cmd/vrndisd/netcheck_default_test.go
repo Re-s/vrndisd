@@ -19,7 +19,7 @@ func TestNetcheckDefaultServerFromClientConfig(t *testing.T) {
 		Server: "5.6.7.8:7777",
 		PSK:    "cfg-psk",
 	}, nil)
-	primary, secondary, err := netcheckDefaultServer()
+	primary, secondary, err := netcheckDefaultServer("")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestNetcheckDefaultServerFromServerConfig(t *testing.T) {
 		Listen: "0.0.0.0:7777",
 		PSK:    "srv-psk",
 	}, nil)
-	primary, secondary, err := netcheckDefaultServer()
+	primary, secondary, err := netcheckDefaultServer("")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestNetcheckDefaultServerFromServerConfig(t *testing.T) {
 
 func TestNetcheckDefaultServerNoConfig(t *testing.T) {
 	withInstalledConfig(t, nil, errors.New("no such file"))
-	_, _, err := netcheckDefaultServer()
+	_, _, err := netcheckDefaultServer("")
 	if err == nil {
 		t.Fatal("无已安装配置应报错")
 	}
@@ -66,7 +66,7 @@ func TestNetcheckDefaultServerConfigWithoutPort(t *testing.T) {
 		Mode:   "client",
 		Server: "5.6.7.8",
 	}, nil)
-	primary, secondary, err := netcheckDefaultServer()
+	primary, secondary, err := netcheckDefaultServer("")
 	if err != nil || primary != "5.6.7.8:5478" || secondary != "5.6.7.8:5479" {
 		t.Fatalf("无端口配置应回退 5478/5479: got %q %q %v", primary, secondary, err)
 	}

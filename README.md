@@ -136,6 +136,13 @@ vrndisd netcheck --server 203.0.113.1 --extra-stun stun.l.google.com:19302
 vrndisd ping 10.77.0.4 --count 5
 # --server/--psk 可省略：回退读已安装服务配置（vrndisd service install 写入的
 # /etc/vrndisd.conf 或 %ProgramData%\vrndisd\vrndisd.conf）；
+# 也可以用 --config 指定任意路径的配置文件（/etc 之外的非标准目录，如
+# Termux/Android 应用沙箱）：
+#   vrndisd peers --config ~/vrndisd.conf
+#   vrndisd ping 10.77.0.4 --config ~/vrndisd.conf
+# 配置文件即 service install 写入的 JSON（最小示例）：
+#   {"mode":"client","server":"203.0.113.1:7777","psk":"yourpsk","name":"phone"}
+# 优先级：命令行 flag > --config 文件 > 已安装配置。
 # 本机即服务器时自动用 listen 地址回环直连。显式指定仍然优先：
 #   vrndisd ping 10.77.0.4 --server 203.0.113.1:7777 --psk yourpsk
 # 若本地到该 peer 的直连路径可通，输出 pong from 10.77.0.4 via p2p(1.2.3.4:5678) in 8ms；

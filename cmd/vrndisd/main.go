@@ -152,8 +152,9 @@ func usage() {
 // STUN（及可选第三方 STUN）发送 Binding Request，比对各目的地映射。
 func cmdNetcheck(args []string) error {
 	fs := flag.NewFlagSet("netcheck", flag.ExitOnError)
-	server := fs.String("server", "", "服务器 STUN 地址 host[:port]（默认端口 5478；留空=用已安装配置连接的服务器）")
+	server := fs.String("server", "", "服务器 STUN 地址 host[:port]（默认端口 5478；留空=用 --config 或已安装配置连接的服务器）")
 	extra := fs.String("extra-stun", "", "可选第三方 STUN host[:port]（跨公网 IP 映射比对）")
+	cfgPath := fs.String("config", "", "配置文件路径（--server 未指定时从此读取服务器地址，适配 /etc 之外的非标准目录）")
 	fs.Parse(args)
 	var primary, secondary string
 	if *server != "" {
@@ -171,7 +172,7 @@ func cmdNetcheck(args []string) error {
 		// server 模式回环本机）。STUN 端口固定 5478/5479——与客户端
 		// candidateAddr 同一推导：STUN 走服务器 host + 固定端口，
 		// 而非控制端口 7777。
-		p, s, err := netcheckDefaultServer()
+		p, s, err := netcheckDefaultServer(*cfgPath)
 		if err != nil {
 			return err
 		}
@@ -229,8 +230,8 @@ func cmdNetcheck(args []string) error {
 // client 模式取配置的服务器地址，server 模式回环本机；返回 STUN
 // 主/第二探测地址（host + 5478/5479）。端口推导与客户端 candidateAddr
 // 一致：STUN 挂在服务器公网 host 的固定端口，控制端口 7777 不作 STUN。
-func netcheckDefaultServer() (primary, secondary string, err error) {
-	resolved, _, _, err := resolvePeerFlags("", "", "")
+func netcheckDefaultServer(cfgPath string) (primary, secondary string, err error) {
+	resolved, _, _, err := resolvePeerFlags("", "", "", cfgPath)
 	if err != nil {
 		return "", "", err
 	}
@@ -376,20 +377,30 @@ var loadInstalledConfig = func() (*service.Config, error) {
 	return service.Load(service.DefaultConfigPath())
 }
 
-// resolvePeerFlags 为 ping/peers 解析服务器参数：优先命令行 flag，
+// resolvePeerFlags 为 ping/peers/netcheck 解析服务器参数：优先命令行 flag，
 // 缺省回退到已安装服务配置（service install 写入 DefaultConfigPath），
 // 实现"本机已配置客户端/服务器时免输 --server/--psk"。
 // server 模式配置回退到回环地址直连本机服务器。
-func resolvePeerFlags(server, psk, name string) (string, string, string, error) {
-	if server != "" {
+func resolvePeerFlags(server, psk, name, cfgPath string) (string, string, string, error) {
+	if server != "" && cfgPath == "" {
 		return server, psk, name, nil
 	}
-	cfg, err := loadInstalledConfig()
-	if err != nil {
+	var cfg *service.Config
+	var loadErr error
+	if cfgPath != "" {
+		cfg, loadErr = service.Load(cfgPath)
+		if loadErr != nil {
+			return "", "", "", fmt.Errorf("--config %s 读取失败: %w", cfgPath, loadErr)
+		}
+	} else {
+		cfg, loadErr = loadInstalledConfig()
+	}
+	if loadErr != nil {
 		return "", "", "", fmt.Errorf(
 			"--server 必填（未指定且无法读取已安装配置 %s: %v；"+
-				"可用 vrndisd service install --mode client --server HOST:7777 预置）",
-			service.DefaultConfigPath(), err)
+				"可用 vrndisd service install --mode client --server HOST:7777 预置，"+
+				"或加 --config 指定其它路径的配置文件）",
+			service.DefaultConfigPath(), loadErr)
 	}
 	switch cfg.Mode {
 	case "client":
@@ -404,13 +415,16 @@ func resolvePeerFlags(server, psk, name string) (string, string, string, error) 
 	default:
 		return "", "", "", fmt.Errorf("已安装配置 mode 无效: %q", cfg.Mode)
 	}
+	if server == "" {
+		server = cfg.Server
+	}
 	if psk == "" {
 		psk = cfg.PSK
 	}
 	if name == "" {
 		name = cfg.Name
 	}
-	return cfg.Server, psk, name, nil
+	return server, psk, name, nil
 }
 
 // loopbackAddr 把监听地址中的通配 host（0.0.0.0/[::]/空）替换为 127.0.0.1，
@@ -436,6 +450,7 @@ func cmdPing(args []string) error {
 	fs := flag.NewFlagSet("ping", flag.ExitOnError)
 	server := fs.String("server", "", "服务器地址 host:port")
 	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
+	cfgPath := fs.String("config", "", "配置文件路径（--server/psk/name 未指定时从此读取，适配 /etc 之外的非标准目录）")
 	count := fs.Int("count", 5, "探测次数")
 	wait := fs.Duration("wait", 3*time.Second, "每次探测等待超时")
 	name := fs.String("name", "", "客户端名称（默认 ping，或取自已安装配置）")
@@ -447,7 +462,7 @@ func cmdPing(args []string) error {
 	if len(positional) > 0 {
 		target = positional[0]
 	}
-	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name)
+	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name, *cfgPath)
 	if err != nil {
 		return err
 	}
@@ -538,13 +553,14 @@ func cmdPeers(args []string) error {
 	fs := flag.NewFlagSet("peers", flag.ExitOnError)
 	server := fs.String("server", "", "服务器地址 host:port")
 	psk := fs.String("psk", "", "预共享密钥（启用加密时必填）")
+	cfgPath := fs.String("config", "", "配置文件路径（--server/psk/name 未指定时从此读取，适配 /etc 之外的非标准目录）")
 	wait := fs.Duration("wait", 3*time.Second, "每个 peer 探测超时")
 	name := fs.String("name", "", "客户端名称（默认 peers，或取自已安装配置）")
 	if handleHelp(fs, args) {
 		return nil
 	}
 	parseLoose(fs, args)
-	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name)
+	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name, *cfgPath)
 	if err != nil {
 		return err
 	}
@@ -756,7 +772,7 @@ func cmdClient(args []string) error {
 	// 客户端模式取其 server 地址，服务器模式回环直连本机；psk/name 一并补齐。
 	// 未安装配置时 resolvePeerFlags 会报错并给出预置方法。
 	if cfg.Server == "" {
-		srv, pskStr, nameStr, err := resolvePeerFlags("", *psk, cfg.Name)
+		srv, pskStr, nameStr, err := resolvePeerFlags("", *psk, cfg.Name, "")
 		if err != nil {
 			return err
 		}
