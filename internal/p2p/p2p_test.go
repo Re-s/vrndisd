@@ -498,3 +498,57 @@ func itoa(n int) string {
 	}
 	return string(b[i:])
 }
+
+// 对端换地址（CGNAT 重映射）且从未注册候选时，收到的数据帧应自动教会
+// 本端该源 MAC 的新地址，使回程帧直达新地址。
+func TestTunnelLearnsRouteFromDataFrame(t *testing.T) {
+	tunA, tunB, macA, macB := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+	_ = macA
+
+	// C 扮演"地址漂移后的对端"：新 UDP socket，无候选、无打洞。
+	connC, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: 0})
+	if err != nil {
+		t.Fatalf("bind C: %v", err)
+	}
+	defer connC.Close()
+	addrC := connC.LocalAddr().(*net.UDPAddr)
+	macC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0xcc, 0x01}
+
+	// C 向 B 直接发数据帧。
+	frame := ethernet.BuildFrame(macB, macC, ethernet.TypeIPv4, []byte("roaming-peer"))
+	// B 的隧道 socket 可能是双栈 :: 监听，统一按 v4 回环寻址。
+	destB := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tunB.Addr().(*net.UDPAddr).Port}
+	if _, err := connC.WriteToUDP(frame, destB); err != nil {
+		t.Fatalf("C write: %v", err)
+	}
+
+	// B 读到帧，且学到 macC -> addrC。
+	_ = tunB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got, err := tunB.Read()
+	if err != nil {
+		t.Fatalf("B read: %v", err)
+	}
+	if !bytes.Equal(got, frame) {
+		t.Fatalf("B 收到 %v want %v", got, frame)
+	}
+	if route := tunB.Routes()[macC.String()]; route != addrC.String() {
+		t.Fatalf("B 未学习 macC 路由: got=%v want=%s", route, addrC)
+	}
+
+	// B 向 macC 回帧应直达 C（不经中继、不丢）。
+	reply := ethernet.BuildFrame(macC, macB, ethernet.TypeIPv4, []byte("reply"))
+	if err := tunB.Write(reply); err != nil {
+		t.Fatalf("B write: %v", err)
+	}
+	_ = connC.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, maxUDPFrame)
+	n, _, err := connC.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("C read: %v", err)
+	}
+	if !bytes.Equal(buf[:n], reply) {
+		t.Fatalf("C 收到 %v want %v", buf[:n], reply)
+	}
+}

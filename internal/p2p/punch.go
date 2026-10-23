@@ -256,6 +256,31 @@ func (t *Tunnel) RegisterRoute(mac net.HardwareAddr, addr *net.UDPAddr) {
 	t.routes[mac.String()] = &a
 }
 
+// learnRoute 从收到的数据帧学习「源 MAC -> 来源 UDP 地址」路由。
+//
+// 候选驱动的路由注册（RegisterRoute）依赖对端上报候选的时效性；CGNAT
+// 下对端 srflx 会频繁重映射，打洞时拿到的候选常已过期，导致单向通：
+// 本端能收到对端数据帧（按真实地址送达），回程帧却因路由表无条目而
+// 退回中继。数据帧自带源 MAC，从实际流量学习既即时生效又天然跟随
+// 对端地址漂移（类似交换机端口自学习）。
+func (t *Tunnel) learnRoute(frame []byte, from *net.UDPAddr) {
+	f, err := ethernet.ParseFrame(frame)
+	if err != nil || len(f.Src) == 0 {
+		return
+	}
+	src := f.Src.String()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.routes == nil {
+		t.routes = make(map[string]*net.UDPAddr)
+	}
+	if cur, ok := t.routes[src]; ok && cur.String() == from.String() {
+		return // 已是最新条目，避免无谓写与读端抖动
+	}
+	a := *from
+	t.routes[src] = &a
+}
+
 // KnownAddr 该地址是否已验证可达（收到过它的包）。
 func (t *Tunnel) KnownAddr(addr *net.UDPAddr) bool {
 	if addr == nil {
@@ -376,6 +401,9 @@ func (t *Tunnel) Read() ([]byte, error) {
 			}
 			continue
 		}
+		// 数据帧自带源 MAC：从实际流量学习「源 MAC -> 来源地址」路由，
+		// 即时自愈候选过期/地址漂移导致的单向通。
+		t.learnRoute(frame, from)
 		return frame, nil
 	}
 }
