@@ -1254,25 +1254,31 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 					}
 				}
 				if len(addrs) > 0 {
-					if c.tunnelPeerIs(mac) {
-						break // 已与该 peer 直连：新候选无意义，直接丢弃
-					}
-					// 隧道存活时按候选动态注册直连路由：该 peer 若已被本端
-					// 隧道验证可达（给我们回过包），直接加入路由表，无需
-					// 重建整条隧道（新上线的 peer 也能即时直连）。
+					// 隧道存活时按候选维护直连路由（不必重建整条隧道）：
+					//  - 候选已被本端验证可达（回过包）→ 直接注册
+					//  - 无路由也无验证过的候选 → 主动探测
+					//  - 已有路由但候选指向新地址（对端 NAT 重映射）→ 探测新候选，
+					//    成功即替换；避免旧路由指向已失效地址导致 UDP 静默丢包。
 					if tun := c.getTunnel(); tun != nil && !c.isP2PActive() {
+						cur := tun.Routes()[mac.String()]
+						routeInAddrs := false
 						registered := false
 						for _, a := range addrs {
+							if cur != "" && a.String() == cur {
+								routeInAddrs = true
+							}
 							if tun.KnownAddr(a) {
-								tun.RegisterRoute(mac, a)
-								c.logger.Debugf("vrndis client: P2P 动态注册路由 %s -> %v", mac, a)
+								if a.String() != cur {
+									tun.RegisterRoute(mac, a)
+									c.logger.Debugf("vrndis client: P2P 动态注册路由 %s -> %v", mac, a)
+								}
 								registered = true
 								break
 							}
 						}
-						// 隧道存活但该对端从未回过包（不在当年打洞窗口内）：
-						// 主动探测争取直连路由，免去重建整条隧道。
-						if !registered {
+						if !registered && (cur == "" || !routeInAddrs) {
+							// 无路由，或已有路由已不在新候选中（地址漂移）：
+							// 主动探测争取/更新直连路由。
 							c.probePeerRoute(tun, mac, addrs)
 						}
 					}
