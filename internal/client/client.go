@@ -26,6 +26,7 @@ import (
 
 	"vrndis/internal/crypto"
 	"vrndis/internal/ethernet"
+	"vrndis/internal/loglevel"
 	"vrndis/internal/mgmt"
 	"vrndis/internal/p2p"
 	"vrndis/internal/proto"
@@ -70,13 +71,21 @@ type Config struct {
 	// 本机管理面：仅回环 TCP，供 vrndisd local / status 查询本实例状态。
 	// 空用默认 127.0.0.1:7790（同机多实例自动避让到 7791..7799）；"-" 禁用。
 	ManagementListen string
+
+	// 日志级别：debug/info/warn/error（默认 info）。
+	// debug 含数据面逐帧事件（背压丢帧、候选变化），弱网下会刷屏。
+	LogLevel string
 }
 
 // Client 虚拟 RNDIS 客户端。
 type Client struct {
 	cfg    Config
 	dev    tap.Device
-	logger *log.Logger
+	logger *loglevel.Logger
+
+	// 背压丢帧统计：网卡队列满是逐帧事件，合并为每秒一条统计输出。
+	devDropFrames atomic.Uint64
+	dropLog       *loglevel.RateLimiter
 
 	// 共享数据面：devToSock 长期驻留，跨连接复用同一块虚拟网卡。
 	devPumpOnce sync.Once
@@ -126,9 +135,16 @@ func New(cfg Config) *Client {
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = 10 * time.Second
 	}
+	level, err := loglevel.ParseLevel(cfg.LogLevel)
+	if err != nil {
+		// 非法级别不阻断启动：回退 info 并提示。
+		log.Printf("vrndis client: %v，回退 info", err)
+		level = loglevel.LevelInfo
+	}
 	return &Client{
 		cfg:        cfg,
-		logger:     log.Default(),
+		logger:     loglevel.New(log.Default(), level),
+		dropLog:    loglevel.NewRateLimiter(time.Second),
 		stopCh:     make(chan struct{}),
 		peerCandCh: make(chan *peerInfo, 16),
 		startedAt:  time.Now(),
@@ -161,7 +177,7 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 			return nil, fmt.Errorf("握手失败（服务器可能未启用加密，双方 --psk 需一致）: %w", err)
 		}
 		c.crypto = secure
-		c.logger.Printf("vrndis client: 加密握手成功")
+		c.logger.Infof("vrndis client: 加密握手成功")
 	}
 
 	helloBody, _ := json.Marshal(proto.Hello{Version: proto.ProtocolVersion, Name: c.cfg.Name})
@@ -246,7 +262,7 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	// MTU 会触发 IP 分片，分片包在 WiFi/移动网络上丢一个片整帧全废——
 	// 服务器统一配 1400 即可消除分片（旧服务器不下发则保持系统默认）。
 	if err := dev.SetMTU(assign.MTU); err != nil {
-		c.logger.Printf("vrndis client: 设置 MTU %d 失败（继续运行）: %v", assign.MTU, err)
+		c.logger.Warnf("vrndis client: 设置 MTU %d 失败（继续运行）: %v", assign.MTU, err)
 	}
 	if err := dev.Up(); err != nil {
 		conn.Close()
@@ -265,10 +281,10 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 			AddDefaultRouteProtected(gateway, exclude net.IP) error
 		}); ok && exclude != nil {
 			if err := rp.AddDefaultRouteProtected(gw, exclude); err != nil {
-				c.logger.Printf("vrndis client: 设置默认路由失败（继续运行）: %v", err)
+				c.logger.Warnf("vrndis client: 设置默认路由失败（继续运行）: %v", err)
 			}
 		} else if err := dev.AddDefaultRoute(gw); err != nil {
-			c.logger.Printf("vrndis client: 设置默认路由失败（继续运行）: %v", err)
+			c.logger.Warnf("vrndis client: 设置默认路由失败（继续运行）: %v", err)
 		}
 	}
 
@@ -313,7 +329,7 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 				isCurrent := c.conn == conn
 				c.connMu.Unlock()
 				if isCurrent {
-					c.logger.Printf("vrndis client: ARP 回传失败: %v", err)
+					c.logger.Warnf("vrndis client: ARP 回传失败: %v", err)
 				}
 			}
 		})
@@ -357,7 +373,7 @@ func (c *Client) connectOnce() (*proto.Assignment, error) {
 	}
 
 	c.connects.Add(1)
-	c.logger.Printf("vrndis client: 已连接 %s，本机地址 %s/%d 网关 %s",
+	c.logger.Infof("vrndis client: 已连接 %s，本机地址 %s/%d 网关 %s",
 		c.cfg.Server, assign.IP, assign.Prefix, assign.Gateway)
 	return &assign, nil
 }
@@ -536,13 +552,13 @@ func (c *Client) replayAdvertise() {
 	}
 	body, _ := json.Marshal(adv)
 	if err := c.send(conn, proto.TypeP2PAdvertise, body); err != nil {
-		c.logger.Printf("vrndis client: 重连后重播候选失败: %v（隧道不受影响）", err)
+		c.logger.Warnf("vrndis client: 重连后重播候选失败: %v（隧道不受影响）", err)
 		return
 	}
 	// 同步拉取当前在线候选：现有隧道可按新候选动态注册路由。
 	qbody, _ := json.Marshal(proto.PeerQuery{Version: proto.ProtocolVersion})
 	_ = c.send(conn, proto.TypePeerQuery, qbody)
-	c.logger.Printf("vrndis client: P2P 隧道仍存活，已重播候选 %s（含 %d 条）", adv.Candidate, len(adv.Candidates))
+	c.logger.Infof("vrndis client: P2P 隧道仍存活，已重播候选 %s（含 %d 条）", adv.Candidate, len(adv.Candidates))
 }
 
 // startP2PConnect 抢占式启动一轮打洞：通过 p2pActive/隧道/退避三重检查后
@@ -586,10 +602,10 @@ func (c *Client) failP2PRound(reason string) {
 	c.p2pBackoff = time.Now().Add(delay)
 	c.p2pMu.Unlock()
 	if n == 1 {
-		c.logger.Printf("vrndis client: P2P 首轮失败: %s（已回退 TCP 中继，二层网络不受影响）", reason)
-		c.logger.Printf("vrndis client: 常见原因: 对端未上线 / 对称 NAT / 本 NAT 无 hairpin（同 NAT 设备互打需 hairpin）")
+		c.logger.Warnf("vrndis client: P2P 首轮失败: %s（已回退 TCP 中继，二层网络不受影响）", reason)
+		c.logger.Debugf("vrndis client: 常见原因: 对端未上线 / 对称 NAT / 本 NAT 无 hairpin（同 NAT 设备互打需 hairpin）")
 	} else {
-		c.logger.Printf("vrndis client: P2P 连续 %d 轮失败（最近: %s），继续走中继，%v 后重试", n, reason, delay.Round(time.Second))
+		c.logger.Warnf("vrndis client: P2P 连续 %d 轮失败（最近: %s），继续走中继，%v 后重试", n, reason, delay.Round(time.Second))
 	}
 	c.wg.Add(1)
 	go func() {
@@ -712,7 +728,7 @@ func (c *Client) p2pConnect() {
 
 	stun := c.candidateAddr()
 	if stun == "" {
-		c.logger.Printf("vrndis client: P2P 未配置 STUN 服务器，回退 TCP 中继")
+		c.logger.Warnf("vrndis client: P2P 未配置 STUN 服务器，回退 TCP 中继")
 		return
 	}
 	// 清理上一轮残留：撤销仍旧登记在服务器上的旧候选，并丢弃等待通道里
@@ -736,11 +752,11 @@ func (c *Client) p2pConnect() {
 	}()
 	stunConn, localAddr, err := p2p.Discover(ctx, stun, 0)
 	if err != nil {
-		c.logger.Printf("vrndis client: STUN Discover 失败: %v（回退 TCP 中继）", err)
+		c.logger.Warnf("vrndis client: STUN Discover 失败: %v（回退 TCP 中继）", err)
 		return
 	}
 	srflx := net.JoinHostPort(localAddr.IP.String(), strconv.Itoa(localAddr.Port))
-	c.logger.Printf("vrndis client: 本地候选 %v", srflx)
+	c.logger.Debugf("vrndis client: 本地候选 %v", srflx)
 
 	// 2) 收集本机全部候选并上报。
 	// 候选共用 STUN Discover 的同一 socket（srflx 端口即打洞端口）：
@@ -769,7 +785,7 @@ func (c *Client) p2pConnect() {
 		if hosts, herr := p2p.HostCandidates(uaddr.Port, selfIP, tunnelNet); herr == nil {
 			advList = append(advList, hosts...)
 		} else {
-			c.logger.Printf("vrndis client: host 候选收集失败: %v", herr)
+			c.logger.Warnf("vrndis client: host 候选收集失败: %v", herr)
 		}
 	}
 	// 2.5) 网关端口映射（UPnP IGD / NAT-PMP）：为对称 NAT 争取一个固定
@@ -777,12 +793,12 @@ func (c *Client) p2pConnect() {
 	// WAN 地址；多出口环境小概率失配，作为多候选之一失败无害）。
 	// 失败静默：无 UPnP 的网络照常纯 STUN 打洞，不产生额外候选。
 	if uaddr, ok := stunConn.LocalAddr().(*net.UDPAddr); ok {
-		if extPort := p2p.MapPort(uaddr.Port, c.logger); extPort != 0 {
+		if extPort := p2p.MapPort(uaddr.Port, c.logger.Logger); extPort != 0 {
 			advList = append(advList, net.JoinHostPort(localAddr.IP.String(), strconv.Itoa(extPort)))
 		}
 	}
 	if extra := len(advList) - 1; extra > 0 {
-		c.logger.Printf("vrndis client: 候选多路化: srflx=%s, %d 个额外候选 %v", srflx, extra, advList[1:])
+		c.logger.Debugf("vrndis client: 候选多路化: srflx=%s, %d 个额外候选 %v", srflx, extra, advList[1:])
 	}
 
 	adv := &proto.P2PAdvertise{
@@ -825,7 +841,7 @@ func (c *Client) p2pConnect() {
 		return
 	}
 	for _, p := range peers {
-		c.logger.Printf("vrndis client: 收到对端 %s 候选 %v", p.MAC, p.Addrs)
+		c.logger.Debugf("vrndis client: 收到对端 %s 候选 %v", p.MAC, p.Addrs)
 	}
 
 	// 4) 打洞
@@ -903,7 +919,7 @@ func (c *Client) p2pConnect() {
 		})
 		_ = c.send(conn, proto.TypeP2PReady, body)
 	}
-	c.logger.Printf("vrndis client: P2P 隧道已建立 -> %v，直连路由 %d 条", tun.Peer(), routes)
+	c.logger.Infof("vrndis client: P2P 隧道已建立 -> %v，直连路由 %d 条", tun.Peer(), routes)
 
 	// 5) 隧道读循环：UDP 隧道 -> 本地网卡；隧道断开（空闲超时或对端关闭）
 	// 时退出，自动回退 TCP 中继（二层不断连）。AttachIdleMonitor 负责空闲检测。
@@ -919,13 +935,13 @@ func (c *Client) p2pConnect() {
 				if errors.Is(err, tap.ErrBufferFull) {
 					continue
 				}
-				c.logger.Printf("vrndis client: P2P 隧道写入本地网卡失败: %v", err)
+				c.logger.Errorf("vrndis client: P2P 隧道写入本地网卡失败: %v", err)
 				return
 			}
 		}
 	}()
 
-	cancelIdle := tun.AttachIdleMonitor(5*time.Second, c.logger)
+	cancelIdle := tun.AttachIdleMonitor(5*time.Second, c.logger.Logger)
 	<-tun.Done()
 	cancelIdle()
 
@@ -933,7 +949,7 @@ func (c *Client) p2pConnect() {
 	if tun != nil {
 		_ = tun.Close()
 	}
-	c.logger.Printf("vrndis client: P2P 隧道断开，已回退 TCP 中继")
+	c.logger.Warnf("vrndis client: P2P 隧道断开，已回退 TCP 中继")
 }
 
 // Run 连接并运行直到 ctx 取消或整体 Stop。
@@ -942,9 +958,9 @@ func (c *Client) p2pConnect() {
 // 并刷新网卡）；重连次数达到 MaxRetries（>0）仍失败时返回最后一次错误。
 func (c *Client) Run(ctx context.Context) error {
 	// 本机管理面：与重连循环同生命周期，Stop 时关闭。
-	c.mgmtSrv = mgmt.Serve(c.cfg.ManagementListen, c.managementState, c.logger)
+	c.mgmtSrv = mgmt.Serve(c.cfg.ManagementListen, c.managementState, c.logger.Logger)
 	if a := c.mgmtSrv.Addr(); a != "" {
-		c.logger.Printf("vrndis client: 本机管理端口 %s", a)
+		c.logger.Infof("vrndis client: 本机管理端口 %s", a)
 	}
 
 	if !c.cfg.Reconnect {
@@ -976,14 +992,14 @@ func (c *Client) Run(ctx context.Context) error {
 	for {
 		if _, err := c.connectOnce(); err != nil {
 			failures++
-			c.logger.Printf("vrndis client: 连接失败（第 %d 次）: %v", failures, err)
+			c.logger.Warnf("vrndis client: 连接失败（第 %d 次）: %v", failures, err)
 			if c.cfg.MaxRetries > 0 && failures >= c.cfg.MaxRetries {
 				c.Stop()
 				return fmt.Errorf("vrndis/client: 重连 %d 次仍失败: %w", failures, err)
 			}
 		} else {
 			failures = 0
-			c.logger.Printf("vrndis client: 已重连 %s，退避已重置", c.cfg.Server)
+			c.logger.Infof("vrndis client: 已重连 %s，退避已重置", c.cfg.Server)
 			select {
 			case <-ctx.Done():
 				c.Stop()
@@ -991,7 +1007,7 @@ func (c *Client) Run(ctx context.Context) error {
 			case <-c.stopCh:
 				return nil
 			case <-c.connDone:
-				c.logger.Printf("vrndis client: 连接断开，准备重连")
+				c.logger.Infof("vrndis client: 连接断开，准备重连")
 			}
 		}
 
@@ -1119,7 +1135,7 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 			case <-c.stopCh:
 			case <-done:
 			default:
-				c.logger.Printf("vrndis client: 连接关闭: %v", err)
+				c.logger.Warnf("vrndis client: 连接关闭: %v", err)
 			}
 			c.teardownConn(conn)
 			return
@@ -1130,7 +1146,7 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 		if c.crypto != nil && msg.Type == proto.TypeData {
 			plaintext, err := c.crypto.Decrypt(msg.Body)
 			if err != nil {
-				c.logger.Printf("vrndis client: 解密失败: %v", err)
+				c.logger.Errorf("vrndis client: 解密失败: %v", err)
 				c.teardownConn(conn)
 				return
 			}
@@ -1146,10 +1162,15 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 			if err := c.dev.Write(msg.Body); err != nil {
 				if errors.Is(err, tap.ErrBufferFull) {
 					// 背压：网卡队列已满，丢帧继续，不断连（与服务器 tapWriter 一致）。
-					c.logger.Printf("vrndis client: 网卡队列满，丢帧: %v", err)
+					// 逐帧事件会刷屏：计数合并为每秒一条（debug 级别）。
+					n := c.devDropFrames.Add(1)
+					if c.dropLog.Allow("dev-queue-full") {
+						c.logger.Debugf("vrndis client: 网卡队列满，丢帧（过去 1s 共 %d 帧）: %v", n, err)
+						c.devDropFrames.Store(0)
+					}
 					continue
 				}
-				c.logger.Printf("vrndis client: 写入本地网卡失败: %v", err)
+				c.logger.Errorf("vrndis client: 写入本地网卡失败: %v", err)
 				c.teardownConn(conn)
 				return
 			}
@@ -1203,7 +1224,7 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 						for _, a := range addrs {
 							if tun.KnownAddr(a) {
 								tun.RegisterRoute(mac, a)
-								c.logger.Printf("vrndis client: P2P 动态注册路由 %s -> %v", mac, a)
+								c.logger.Debugf("vrndis client: P2P 动态注册路由 %s -> %v", mac, a)
 								break
 							}
 						}
@@ -1211,7 +1232,7 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 					select {
 					case c.peerCandCh <- &peerInfo{MAC: mac, Addrs: addrs}:
 					default:
-						c.logger.Printf("vrndis client: peer 候选通道满，丢弃")
+						c.logger.Warnf("vrndis client: peer 候选通道满，丢弃")
 					}
 				}
 			}
@@ -1272,7 +1293,7 @@ func (c *Client) tryWriteP2P(frame []byte) bool {
 	}
 	// 真实写入失败：触发回退（清除隧道），后续帧自动走 TCP 中继。
 	// 不回写 TCP 以避免切换瞬间的重复投递与乱序。
-	c.logger.Printf("vrndis client: P2P 隧道写入失败: %v，回退 TCP 中继", err)
+	c.logger.Warnf("vrndis client: P2P 隧道写入失败: %v，回退 TCP 中继", err)
 	c.clearTunnel()
 	if tun != nil {
 		_ = tun.Close()
@@ -1296,7 +1317,7 @@ func (c *Client) devToSock() {
 			}
 			// 设备错误(含 wintun 0xC0000005，已由 tap 层归一为 io.EOF)
 			// -> 断开当前连接，走 Run() 正常重连路径；不 panic、不留僵尸隧道
-			c.logger.Printf("vrndis client: 读取本地网卡失败，断开重连: %v", err)
+			c.logger.Errorf("vrndis client: 读取本地网卡失败，断开重连: %v", err)
 			c.teardownCurrentConn()
 			return
 		}
@@ -1316,7 +1337,7 @@ func (c *Client) devToSock() {
 			var err error
 			frame, err = c.crypto.Encrypt(plaintext)
 			if err != nil {
-				c.logger.Printf("vrndis client: 加密失败: %v", err)
+				c.logger.Errorf("vrndis client: 加密失败: %v", err)
 				continue
 			}
 		}
@@ -1328,7 +1349,7 @@ func (c *Client) devToSock() {
 			isCurrent := c.conn == conn
 			c.connMu.Unlock()
 			if isCurrent {
-				c.logger.Printf("vrndis client: 发送失败，连接已断开: %v", err)
+				c.logger.Errorf("vrndis client: 发送失败，连接已断开: %v", err)
 				c.teardownConn(conn)
 			}
 		}
@@ -1360,7 +1381,7 @@ func (c *Client) heartbeat(conn net.Conn, done chan struct{}) {
 			stale := time.Since(c.lastPong) > timeout
 			c.lastPongMu.Unlock()
 			if stale {
-				c.logger.Printf("vrndis client: 心跳超时（%s 无响应），判定断线", timeout)
+				c.logger.Warnf("vrndis client: 心跳超时（%s 无响应），判定断线", timeout)
 				c.teardownConn(conn)
 				return
 			}

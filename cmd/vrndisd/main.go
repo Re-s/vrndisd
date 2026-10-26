@@ -32,6 +32,7 @@ import (
 
 	"vrndis/internal/client"
 	"vrndis/internal/ctrl"
+	"vrndis/internal/loglevel"
 	"vrndis/internal/netcheck"
 	"vrndis/internal/proto"
 	"vrndis/internal/server"
@@ -707,9 +708,16 @@ func cmdServer(args []string) error {
 	stunListenExtra := fs.String("stun-listen-extra", ":5479", "STUN 第二监听地址（netcheck 跨目的地映射比对，检测 symmetric NAT）")
 	psk := fs.String("psk", "", "预共享密钥（非空时要求客户端加密握手）")
 	mgmtListen := fs.String("management-listen", "", "本机管理端口（默认 127.0.0.1:7790，- 禁用）")
+	logLevel := fs.String("log-level", "", "日志级别 debug/info/warn/error（默认 info；debug 含逐帧事件，弱网会刷屏）")
 	fs.Parse(args)
 	if *mgmtListen != "" {
 		cfg.ManagementListen = *mgmtListen
+	}
+	if *logLevel != "" {
+		if _, err := loglevel.ParseLevel(*logLevel); err != nil {
+			return err
+		}
+		cfg.LogLevel = *logLevel
 	}
 	cfg.DNS = splitCSV(fs.Lookup("dns").Value.String())
 	if *psk != "" {
@@ -767,7 +775,14 @@ func cmdClient(args []string) error {
 	fs.StringVar(&cfg.STUNServer, "stun-server", "", "STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时与服务器加密握手）")
 	fs.StringVar(&cfg.ManagementListen, "management-listen", "", "本机管理端口（默认 127.0.0.1:7790，同机多实例自动避让，- 禁用）")
+	logLevel := fs.String("log-level", "", "日志级别 debug/info/warn/error（默认 info；debug 含逐帧事件，弱网会刷屏）")
 	fs.Parse(args)
+	if *logLevel != "" {
+		if _, err := loglevel.ParseLevel(*logLevel); err != nil {
+			return err
+		}
+		cfg.LogLevel = *logLevel
+	}
 	// --server 留空时回退已安装配置（与 netcheck/ping/peers 一致）：
 	// 客户端模式取其 server 地址，服务器模式回环直连本机；psk/name 一并补齐。
 	// 未安装配置时 resolvePeerFlags 会报错并给出预置方法。
@@ -850,9 +865,14 @@ func cmdService(args []string) error {
 	stunServer := fs.String("stun-server", "", "client: STUN 服务器地址（P2P 时使用，默认用服务器地址）")
 	psk := fs.String("psk", "", "预共享密钥（非空时启用加密握手，server/client 通用）")
 	mgmtListen := fs.String("management-listen", "", "本机管理端口（默认 127.0.0.1:7790，同机多实例自动避让，- 禁用）")
+	logLevel := fs.String("log-level", "", "日志级别 debug/info/warn/error（默认 info；debug 含逐帧事件，弱网会刷屏）")
 	output := fs.String("output", "", "export: 写入的目标文件（默认打印到 stdout）")
 	printCfg := fs.Bool("print-config", false, "install: 仅打印将写入的配置 JSON，不安装服务")
 	fs.Parse(args[1:])
+	// 非法级别在此早报错（Visit 闭包无法 return）。
+	if _, err := loglevel.ParseLevel(*logLevel); err != nil {
+		return err
+	}
 
 	mgr := service.NewManager()
 	switch action {
@@ -905,6 +925,8 @@ func cmdService(args []string) error {
 				cfg.PSK = *psk
 			case "management-listen":
 				cfg.ManagementListen = *mgmtListen
+			case "log-level":
+				cfg.LogLevel = *logLevel
 			}
 		})
 		if err := cfg.Validate(); err != nil {
@@ -988,6 +1010,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 	stun := fs.Bool("stun", false, "覆盖配置: 启动内置 STUN 服务器")
 	stunListen := fs.String("stun-listen", "", "覆盖配置: STUN 监听地址")
 	stunListenExtra := fs.String("stun-listen-extra", "", "覆盖配置: STUN 第二监听地址")
+	logLevel := fs.String("log-level", "", "覆盖配置: 日志级别 debug/info/warn/error")
 	fs.Parse(args)
 	if globalCfg != "" {
 		*cfgPath = globalCfg
@@ -995,6 +1018,10 @@ func cmdServiceRun(args []string, globalCfg string) error {
 
 	cfg, err := service.Load(*cfgPath)
 	if err != nil {
+		return err
+	}
+	// 覆盖项非法时直接中止，避免悄悄落到默认 info。
+	if _, err := loglevel.ParseLevel(*logLevel); err != nil {
 		return err
 	}
 	fs.Visit(func(f *flag.Flag) {
@@ -1016,6 +1043,8 @@ func cmdServiceRun(args []string, globalCfg string) error {
 		case "stun-listen":
 			cfg.STUNListen = *stunListen
 			cfg.STUNListenExtra = *stunListenExtra
+		case "log-level":
+			cfg.LogLevel = *logLevel
 		}
 	})
 
@@ -1033,6 +1062,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 				P2P:              cfg.P2P,
 				PSK:              []byte(cfg.PSK),
 				ManagementListen: cfg.ManagementListen,
+				LogLevel:         cfg.LogLevel,
 			})
 			if err != nil {
 				return err
@@ -1072,6 +1102,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 				HeartbeatTimeout:  time.Duration(cfg.HeartbeatTimeout),
 				PSK:               []byte(cfg.PSK),
 				ManagementListen:  cfg.ManagementListen,
+				LogLevel:          cfg.LogLevel,
 			})
 			return c.Run(ctx)
 		default:

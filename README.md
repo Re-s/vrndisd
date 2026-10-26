@@ -148,6 +148,15 @@ vrndisd ping 10.77.0.4 --count 5
 # 若本地到该 peer 的直连路径可通，输出 pong from 10.77.0.4 via p2p(1.2.3.4:5678) in 8ms；
 # 否则输出 via relay 的中继基准 RTT。
 
+# 3) 日志级别：抑制数据面刷屏
+vrndisd client --server 203.0.113.1:7777 --log-level warn
+# 可选 debug / info / warn / error，默认 info。
+# debug 含数据面逐帧事件（网卡队列满丢帧、P2P 动态路由注册、候选变化），
+# 弱网/弱设备下会刷屏；逐帧事件已自动限速为每秒一条统计（如"过去 1s 共 32 帧"）。
+# 服务模式写入配置文件：
+#   vrndisd service install --mode client --server 203.0.113.1:7777 --log-level warn
+# 或直接编辑配置 JSON 的 "log_level" 字段；service-run 也支持 --log-level 临时覆盖。
+
 # 3) peers：全部在线 peer 的路径一览
 vrndisd peers
 # 在线 peer (3)：

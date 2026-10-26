@@ -17,6 +17,7 @@ import (
 	"vrndis/internal/crypto"
 	"vrndis/internal/ethernet"
 	"vrndis/internal/ethswitch"
+	"vrndis/internal/loglevel"
 	"vrndis/internal/mgmt"
 	"vrndis/internal/proto"
 	"vrndis/internal/tap"
@@ -46,6 +47,9 @@ type Config struct {
 	// ManagementListen 本机管理监听地址（clients/status 命令实时查询，
 	// 不走客户端协议、无需 PSK）。为空时用默认 127.0.0.1:7790；"-" 表示禁用。
 	ManagementListen string
+
+	// 日志级别：debug/info/warn/error（默认 info）。
+	LogLevel string
 }
 
 // DefaultConfig 默认配置。
@@ -88,14 +92,18 @@ type peerInfo struct {
 
 // Server 虚拟 RNDIS 服务器。
 type Server struct {
-	cfg     Config
-	dev     tap.Device
-	pool    *addr.Pool
-	sw      *ethswitch.LearningSwitch
-	tapMAC  net.HardwareAddr
-	ln      net.Listener
-	logger  *log.Logger
-	mgmtSrv *mgmt.Server // 本机管理 TCP（clients/status 查询，端口自动避让）
+	cfg    Config
+	dev    tap.Device
+	pool   *addr.Pool
+	sw     *ethswitch.LearningSwitch
+	tapMAC net.HardwareAddr
+	ln     net.Listener
+	logger *loglevel.Logger
+
+	// 背压/失败统计：写入 TAP 失败是逐帧事件，合并为每秒一条统计输出。
+	tapFailures atomic.Uint64
+	tapFailLog  *loglevel.RateLimiter
+	mgmtSrv     *mgmt.Server // 本机管理 TCP（clients/status 查询，端口自动避让）
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -238,16 +246,23 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
+	level, lerr := loglevel.ParseLevel(cfg.LogLevel)
+	if lerr != nil {
+		// 非法级别不阻断启动：回退 info 并提示。
+		log.Printf("vrndis server: %v，回退 info", lerr)
+		level = loglevel.LevelInfo
+	}
 	return &Server{
-		cfg:      cfg,
-		pool:     pool,
-		sw:       ethswitch.New(),
-		tapMAC:   tapMAC,
-		ln:       ln,
-		logger:   log.Default(),
-		sessions: make(map[string]*session),
-		peers:    make(map[string]*peerInfo),
-		stopCh:   make(chan struct{}),
+		cfg:        cfg,
+		pool:       pool,
+		sw:         ethswitch.New(),
+		tapMAC:     tapMAC,
+		ln:         ln,
+		logger:     loglevel.New(log.Default(), level),
+		tapFailLog: loglevel.NewRateLimiter(time.Second),
+		sessions:   make(map[string]*session),
+		peers:      make(map[string]*peerInfo),
+		stopCh:     make(chan struct{}),
 	}, nil
 }
 
@@ -306,12 +321,12 @@ func (s *Server) Start() error {
 	if err := dev.Up(); err != nil {
 		return fmt.Errorf("tap up: %w", err)
 	}
-	s.logger.Printf("vrndis server: TAP %s 就绪（网关 %s/%d），监听 %s",
+	s.logger.Infof("vrndis server: TAP %s 就绪（网关 %s/%d），监听 %s",
 		dev.Name(), s.cfg.Gateway, s.pool.Prefix(), s.ln.Addr())
 
-	s.mgmtSrv = mgmt.Serve(s.cfg.ManagementListen, s.managementState, s.logger)
+	s.mgmtSrv = mgmt.Serve(s.cfg.ManagementListen, s.managementState, s.logger.Logger)
 	if a := s.mgmtSrv.Addr(); a != "" {
-		s.logger.Printf("vrndis server: 本机管理端口 %s", a)
+		s.logger.Infof("vrndis server: 本机管理端口 %s", a)
 	}
 
 	s.wg.Add(3)
@@ -511,7 +526,7 @@ func (s *Server) acceptLoop() {
 			case <-s.stopCh:
 				return
 			default:
-				s.logger.Printf("vrndis server: accept: %v", err)
+				s.logger.Warnf("vrndis server: accept: %v", err)
 				return
 			}
 		}
@@ -532,7 +547,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
 			conn.Close()
-			s.logger.Printf("vrndis server: 客户端 %s 处理消息时 panic，已关闭该连接: %v", peer, r)
+			s.logger.Errorf("vrndis server: 客户端 %s 处理消息时 panic，已关闭该连接: %v", peer, r)
 		}
 	}()
 	var sec *crypto.SecureConn
@@ -540,15 +555,15 @@ func (s *Server) handleConn(conn net.Conn) {
 		var err error
 		sec, err = crypto.ServerHandshake(conn, s.cfg.PSK, proto.ProtocolVersion)
 		if err != nil {
-			s.logger.Printf("vrndis server: 加密握手失败 %s: %v", peer, err)
+			s.logger.Warnf("vrndis server: 加密握手失败 %s: %v", peer, err)
 			conn.Close()
 			return
 		}
-		s.logger.Printf("vrndis server: 加密连接建立 %s", peer)
+		s.logger.Infof("vrndis server: 加密连接建立 %s", peer)
 	}
 	lease, err := s.pool.Allocate()
 	if err != nil {
-		s.logger.Printf("vrndis server: 无法为 %s 分配地址: %v", peer, err)
+		s.logger.Warnf("vrndis server: 无法为 %s 分配地址: %v", peer, err)
 		conn.Close()
 		return
 	}
@@ -579,7 +594,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.sw.Forget(macKey)
 		s.pool.Release(lease.IP)
 		conn.Close()
-		s.logger.Printf("vrndis server: 客户端离开 %s，回收 %s（丢帧 %d）",
+		s.logger.Infof("vrndis server: 客户端离开 %s，回收 %s（丢帧 %d）",
 			peer, lease.IP, sess.dropped.Load())
 	}()
 
@@ -595,25 +610,25 @@ func (s *Server) handleConn(conn net.Conn) {
 		ServerMAC: s.tapMAC.String(),
 		ServerIP:  s.cfg.Gateway,
 	})); err != nil {
-		s.logger.Printf("vrndis server: 下发地址失败 %s: %v", peer, err)
+		s.logger.Warnf("vrndis server: 下发地址失败 %s: %v", peer, err)
 		return
 	}
-	s.logger.Printf("vrndis server: 客户端接入 %s -> 分配 %s (%s)", peer, lease.IP, lease.MAC)
+	s.logger.Infof("vrndis server: 客户端接入 %s -> 分配 %s (%s)", peer, lease.IP, lease.MAC)
 
 	for {
 		msg, err := proto.ReadMessage(conn)
 		if err != nil {
-			s.logger.Printf("vrndis server: 客户端 %s 断开: %v", peer, err)
+			s.logger.Infof("vrndis server: 客户端 %s 断开: %v", peer, err)
 			return
 		}
 		if sess.crypto != nil && len(msg.Body) > 0 {
 			plain, decErr := sess.crypto.Decrypt(msg.Body)
 			if decErr != nil {
-				s.logger.Printf("vrndis server: 解密失败 %s: %v", peer, decErr)
+				s.logger.Errorf("vrndis server: 解密失败 %s: %v", peer, decErr)
 				return
 			}
 			if len(plain) == 0 {
-				s.logger.Printf("vrndis server: 解密得到空数据 %s", peer)
+				s.logger.Errorf("vrndis server: 解密得到空数据 %s", peer)
 				return
 			}
 			// 解包信封：plain[0]=真实类型, plain[1:]=真实body
@@ -698,7 +713,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			sess.p2pReady = false
 			sess.p2pPeerMAC = ""
 			sess.p2pMu.Unlock()
-			s.logger.Printf("vrndis server: peer %s 撤销候选（回退中继）", mac)
+			s.logger.Infof("vrndis server: peer %s 撤销候选（回退中继）", mac)
 		case proto.TypeP2PReady:
 			// 客户端通知打洞成功（管理面展示用，不影响数据面）
 			if !s.cfg.P2P {
@@ -712,7 +727,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			sess.p2pReady = true
 			sess.p2pPeerMAC = ready.PeerMAC
 			sess.p2pMu.Unlock()
-			s.logger.Printf("vrndis server: peer %s P2P 打洞成功 -> %s",
+			s.logger.Infof("vrndis server: peer %s P2P 打洞成功 -> %s",
 				sess.lease.MAC.String(), ready.PeerMAC)
 		case proto.TypePeerQuery:
 			// 查询 peer 候选（ping/status 命令用）；P2P 关闭时无意义
@@ -737,7 +752,7 @@ func (s *Server) unregisterPeer(mac string) {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
 	delete(s.peers, mac)
-	s.logger.Printf("vrndis server: 注销 peer %s", mac)
+	s.logger.Infof("vrndis server: 注销 peer %s", mac)
 }
 
 // candidateHost 从 "host:port" 候选串中取出 host 部分。
@@ -760,7 +775,7 @@ func (s *Server) registerPeer(sess *session, mac, candidate string, candidates [
 	for _, c := range candidates {
 		if host := candidateHost(c); host != "" {
 			if ip := net.ParseIP(host); ip != nil && s.pool.Contains(ip) {
-				s.logger.Printf("vrndis server: 拒绝隧道地址候选 %s -> %s", mac, c)
+				s.logger.Warnf("vrndis server: 拒绝隧道地址候选 %s -> %s", mac, c)
 				continue
 			}
 		}
@@ -795,7 +810,7 @@ func (s *Server) registerPeer(sess *session, mac, candidate string, candidates [
 	sess.p2pCandidates = filtered
 	sess.p2pMu.Unlock()
 	s.peersMu.Unlock()
-	s.logger.Printf("vrndis server: 候选注册 %s -> %v（出口 %v）", mac, filtered, candidateEgress(filtered))
+	s.logger.Infof("vrndis server: 候选注册 %s -> %v（出口 %v）", mac, filtered, candidateEgress(filtered))
 	// 向其它已上报候选的在线 peer 推送本端新候选。
 	// 客户端两端上线时序错开时，只有此处推送才能让对端在打洞窗口内
 	// 拿到本端候选（distributeCandidates 只在新 session 上线时下发）。
@@ -909,7 +924,7 @@ func (s *Server) pushCandidateToOthers(sess *session, selfMAC string, selfCands 
 			Candidate:  list[0],
 			Candidates: list,
 		}))
-		s.logger.Printf("vrndis server: 向 %s 推送新候选 %s -> %v", p.mac, selfMAC, list)
+		s.logger.Infof("vrndis server: 向 %s 推送新候选 %s -> %v", p.mac, selfMAC, list)
 	}
 }
 
@@ -945,7 +960,7 @@ func (s *Server) distributeCandidates(sess *session, selfMAC string) {
 			Candidate:  list[0],
 			Candidates: list,
 		}))
-		s.logger.Printf("vrndis server: 向 %s 下发对端 %s 候选 %v", selfMAC, p.mac, list)
+		s.logger.Infof("vrndis server: 向 %s 下发对端 %s 候选 %v", selfMAC, p.mac, list)
 	}
 }
 
@@ -1046,7 +1061,7 @@ func (s *Server) tapLoop() {
 			select {
 			case <-s.stopCh:
 			default:
-				s.logger.Printf("vrndis server: TAP 读取失败: %v", err)
+				s.logger.Errorf("vrndis server: TAP 读取失败: %v", err)
 			}
 			return
 		}
@@ -1104,7 +1119,12 @@ func (s *Server) tapWriter() {
 				case <-s.stopCh:
 					return
 				default:
-					s.logger.Printf("vrndis server: 写入 TAP 失败: %v", err)
+					// 逐帧事件会刷屏：计数合并为每秒一条。
+					n := s.tapFailures.Add(1)
+					if s.tapFailLog.Allow("tap-write") {
+						s.logger.Errorf("vrndis server: 写入 TAP 失败（过去 1s 共 %d 帧）: %v", n, err)
+						s.tapFailures.Store(0)
+					}
 				}
 			}
 		case <-s.stopCh:

@@ -72,6 +72,10 @@ type Config struct {
 	// 服务器侧：本机管理监听地址（clients/status 命令查询用，无需 PSK）
 	ManagementListen string `json:"management_listen,omitempty"`
 
+	// 日志级别：debug/info/warn/error（默认 info）。
+	// debug 含数据面逐帧事件（背压丢帧、动态路由注册），弱网下会刷屏。
+	LogLevel string `json:"log_level,omitempty"`
+
 	// 客户端侧：P2P、STUN 与自愈参数。
 	STUNServer        string   `json:"stun_server,omitempty"`
 	Reconnect         bool     `json:"reconnect,omitempty"`

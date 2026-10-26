@@ -116,3 +116,18 @@ func TestIsHelpToken(t *testing.T) {
 		}
 	}
 }
+
+func TestCmdClientRejectsInvalidLogLevel(t *testing.T) {
+	// 非法 --log-level 应在建连前报错（校验位于 client.New/Run 之前）。
+	err := cmdClient([]string{"--server", "127.0.0.1:1", "--log-level", "trace"})
+	if err == nil {
+		t.Fatal("非法 log-level 应返回错误")
+	}
+}
+
+func TestCmdServerRejectsInvalidLogLevel(t *testing.T) {
+	err := cmdServer([]string{"--listen", "127.0.0.1:1", "--log-level", "verbose"})
+	if err == nil {
+		t.Fatal("非法 log-level 应返回错误")
+	}
+}
