@@ -678,13 +678,18 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	s.logger.Infof("vrndis server: 客户端接入 %s -> 分配 %s (%s)", peer, lease.IP, lease.MAC)
 
-	first := true // 首条消息已在分配租约前读出，先处理它再继续读流
+	// 首条消息已在分配租约前读出（且已解密），先处理它再继续读流；
+	// alreadyPlain 标记其已解密，避免循环里的解密路径二次解密。
+	first := true
+	alreadyPlain := false
 	for {
 		var msg proto.Message
 		if first {
 			msg = firstMsg
+			alreadyPlain = true
 			first = false
 		} else {
+			alreadyPlain = false
 			var rerr error
 			msg, rerr = proto.ReadMessage(conn)
 			if rerr != nil {
@@ -692,7 +697,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				return
 			}
 		}
-		if sess.crypto != nil && len(msg.Body) > 0 {
+		if !alreadyPlain && sess.crypto != nil && len(msg.Body) > 0 {
 			plain, decErr := sess.crypto.Decrypt(msg.Body)
 			if decErr != nil {
 				s.logger.Errorf("vrndis server: 解密失败 %s: %v", peer, decErr)

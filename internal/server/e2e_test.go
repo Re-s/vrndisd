@@ -419,3 +419,90 @@ func TestSameNameConcurrentClients(t *testing.T) {
 	}
 	waitUntil(t, 2*time.Second, func() bool { return srv.SessionCount() == 2 })
 }
+
+// 加密（PSK）链路的完整连接周期。回归：分配租约前读取的首条 Hello 被解密后
+// 在消息循环里遭到二次解密，导致每个 PSK 连接在 Assign 后立即被打死。
+// 首条消息只解密一次；粘滞租约在加密链路上同样生效。
+func TestPSKEncryptedSession(t *testing.T) {
+	leaseFile := filepath.Join(t.TempDir(), "leases.json")
+	srvDev := tap.NewFake("srv")
+	network, gateway := randTestNetwork()
+	mkServer := func() *server.Server {
+		srv, err := server.New(server.Config{
+			Listen:    "127.0.0.1:0",
+			Network:   network,
+			Gateway:   gateway,
+			TapMAC:    "02:00:00:00:00:00",
+			Device:    srvDev,
+			P2P:       false,
+			PSK:       []byte("e2e-psk"),
+			LeaseFile: leaseFile,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return srv
+	}
+	srv := mkServer()
+	defer srv.Stop()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", srv.Port())
+	dev := tap.NewFake("enc-a")
+	c := client.New(client.Config{Server: addr, Name: "enc-a", Device: dev, PSK: []byte("e2e-psk")})
+	defer c.Stop()
+	a1, err := c.Connect()
+	if err != nil {
+		t.Fatalf("加密连接失败: %v", err)
+	}
+	// 数据面：客户端帧应到达服务器 TAP。
+	frame := ethernet.BuildFrame(
+		mustMAC(t, a1.ServerMAC), mustMAC(t, a1.MAC), ethernet.TypeIPv4, []byte("over-psk"))
+	if err := dev.Inject(frame); err != nil {
+		t.Fatal(err)
+	}
+	got := recvFrame(t, srvDev)
+	if string(got) != string(frame) {
+		t.Fatalf("帧不一致: %d vs %d 字节", len(got), len(frame))
+	}
+	// 服务器→客户端方向：广播帧应送达。
+	bcast := ethernet.BuildFrame(
+		ethernet.Broadcast, mustMAC(t, "02:00:00:00:00:00"), ethernet.TypeIPv4, []byte("down"))
+	if err := srvDev.Inject(bcast); err != nil {
+		t.Fatal(err)
+	}
+	down := recvFrameOn(t, dev)
+	if string(down) != string(bcast) {
+		t.Fatalf("下行帧不一致: %d vs %d 字节", len(down), len(bcast))
+	}
+
+	// 重启后同 name 复用原租约（加密链路上粘滞同样生效）。
+	c.Stop()
+	waitUntil(t, 2*time.Second, func() bool { return srv.SessionCount() == 0 })
+	srv.Stop()
+	srv2 := mkServer()
+	defer srv2.Stop()
+	addr2 := fmt.Sprintf("127.0.0.1:%d", srv2.Port())
+	c2 := client.New(client.Config{Server: addr2, Name: "enc-a", Device: tap.NewFake("enc-a"), PSK: []byte("e2e-psk")})
+	defer c2.Stop()
+	a2, err := c2.Connect()
+	if err != nil {
+		t.Fatalf("重启后加密连接失败: %v", err)
+	}
+	if a2.IP != a1.IP || a2.MAC != a1.MAC {
+		t.Fatalf("加密链路租约漂移: 旧 %s/%s 新 %s/%s", a1.IP, a1.MAC, a2.IP, a2.MAC)
+	}
+	// 错误 PSK 必须连接失败。
+	bad := client.New(client.Config{Server: addr2, Name: "bad", Device: tap.NewFake("bad"), PSK: []byte("wrong")})
+	if _, err := bad.Connect(); err == nil {
+		bad.Stop()
+		t.Fatal("错误 PSK 应连接失败")
+	}
+}
+
+func recvFrameOn(t *testing.T, dev *tap.Fake) []byte {
+	t.Helper()
+	return recvFrame(t, dev)
+}
