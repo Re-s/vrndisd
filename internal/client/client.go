@@ -112,6 +112,7 @@ type Client struct {
 	peering     bool                // 是否正在打洞中
 	peerCandCh  chan *peerInfo      // 服务器下发的对端候选（仅 P2P）
 	p2pActive   bool                // p2pConnect 运行中标记（事件驱动重启去抖）
+	probing     map[string]struct{} // 正在主动探测的对端 MAC（防同 MAC 并发探测风暴）
 	p2pFailures int                 // 连续打洞失败轮数（成功清零）
 	p2pBackoff  time.Time           // 退避结束时刻；早于此后不启动新一轮打洞
 	lastAdv     *proto.P2PAdvertise // 最近一次成功上报的候选（重连时隧道仍存活则重播）
@@ -420,6 +421,10 @@ func (c *Client) managementState() proto.ManagementState {
 		if t := tun.LastTxTime(); !t.IsZero() {
 			st.P2P.LastTxAgo = time.Since(t).Round(time.Second).String()
 		}
+		// 数据帧计数：判别"路由表正确但数据面仍走中继"的关键指标
+		// （计数为 0 或与系统流量明显不符 = 路由未真正承载流量）。
+		st.P2P.TxFrames = tun.TxFrames()
+		st.P2P.RxFrames = tun.RxFrames()
 	} else if peering {
 		st.P2P.LastFail = "打洞中"
 	} else if lastFail != "" {
@@ -559,6 +564,41 @@ func (c *Client) replayAdvertise() {
 	qbody, _ := json.Marshal(proto.PeerQuery{Version: proto.ProtocolVersion})
 	_ = c.send(conn, proto.TypePeerQuery, qbody)
 	c.logger.Infof("vrndis client: P2P 隧道仍存活，已重播候选 %s（含 %d 条）", adv.Candidate, len(adv.Candidates))
+}
+
+// probePeerRoute 对"隧道已存活但尚未建立直连路由"的对端发起主动探测：
+// 经现有隧道 socket 向其候选发送探测包，对端回包后注册直连路由。
+//
+// 覆盖缺陷 B 的时序缺口：旧实现仅靠 KnownAddr 动态注册，而 KnownAddr
+// 只有在该 peer 于打洞窗口内回过包时才为 true——隧道存活期间后上线或
+// 重连的对端永远拿不到路由，只能走中继。同一 MAC 的探测同时只跑一个，
+// 探测超时或隧道关闭即退出，不阻塞控制面。
+func (c *Client) probePeerRoute(tun *p2p.Tunnel, mac net.HardwareAddr, addrs []*net.UDPAddr) {
+	key := mac.String()
+	c.p2pMu.Lock()
+	if c.probing == nil {
+		c.probing = make(map[string]struct{})
+	}
+	if _, inFlight := c.probing[key]; inFlight {
+		c.p2pMu.Unlock()
+		return
+	}
+	c.probing[key] = struct{}{}
+	c.p2pMu.Unlock()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		defer func() {
+			c.p2pMu.Lock()
+			delete(c.probing, key)
+			c.p2pMu.Unlock()
+		}()
+		if tun.ProbeRoute(mac, addrs, 3*time.Second) {
+			c.logger.Infof("vrndis client: P2P 主动探测成功，注册路由 %s（隧道存活期间新对端）", key)
+		} else {
+			c.logger.Debugf("vrndis client: P2P 主动探测 %s 无应答，该对端暂走中继", key)
+		}
+	}()
 }
 
 // startP2PConnect 抢占式启动一轮打洞：通过 p2pActive/隧道/退避三重检查后
@@ -1221,12 +1261,19 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 					// 隧道验证可达（给我们回过包），直接加入路由表，无需
 					// 重建整条隧道（新上线的 peer 也能即时直连）。
 					if tun := c.getTunnel(); tun != nil && !c.isP2PActive() {
+						registered := false
 						for _, a := range addrs {
 							if tun.KnownAddr(a) {
 								tun.RegisterRoute(mac, a)
 								c.logger.Debugf("vrndis client: P2P 动态注册路由 %s -> %v", mac, a)
+								registered = true
 								break
 							}
+						}
+						// 隧道存活但该对端从未回过包（不在当年打洞窗口内）：
+						// 主动探测争取直连路由，免去重建整条隧道。
+						if !registered {
+							c.probePeerRoute(tun, mac, addrs)
 						}
 					}
 					select {

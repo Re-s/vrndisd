@@ -552,3 +552,211 @@ func TestTunnelLearnsRouteFromDataFrame(t *testing.T) {
 		t.Fatalf("C 收到 %v want %v", buf[:n], reply)
 	}
 }
+
+// 路由按地址驱逐：同一地址只允许一个 MAC 键。
+// 回归：服务器按会话顺序重分 MAC，重连 peer 继承旧 peer 的 MAC，
+// 而本地 routes 跨隧道存活，旧 (MAC->addr) 残留会错投帧。
+func TestRegisterRouteEvictsStaleMACForSameAddr(t *testing.T) {
+	tunA, tunB, _, _ := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+
+	addrX := tunB.Peer() // 任意一个真实可达地址
+	macOld := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0xEE}
+	macNew := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0xEF}
+
+	tunA.RegisterRoute(macOld, addrX)
+	if got := tunA.Routes()[macOld.String()]; got != addrX.String() {
+		t.Fatalf("预置 stale 路由失败: got=%v", got)
+	}
+	// 同一地址换新 MAC 注册：旧键应被驱逐。
+	tunA.RegisterRoute(macNew, addrX)
+	routes := tunA.Routes()
+	if _, ok := routes[macOld.String()]; ok {
+		t.Fatalf("旧 MAC 键未被驱逐: %v", routes)
+	}
+	if got := routes[macNew.String()]; got != addrX.String() {
+		t.Fatalf("新路由缺失: got=%v", got)
+	}
+}
+
+// 数据帧学习同样按地址驱逐：漂移对端用同一地址新 MAC 发帧时，
+// 指向该地址的旧 MAC 键必须被清掉。
+func TestLearnRouteEvictsStaleMACForSameAddr(t *testing.T) {
+	tunA, tunB, macA, macB := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+	_ = macA
+
+	// C：原始 socket，地址固定 addrC。
+	connC, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("bind C: %v", err)
+	}
+	defer connC.Close()
+	addrC := connC.LocalAddr().(*net.UDPAddr)
+	destB := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tunB.Addr().(*net.UDPAddr).Port}
+
+	// 预置：B 的路由表里 macOld -> addrC（模拟旧的残留条目）。
+	macOld := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0xEE}
+	macNew := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0xEF}
+	tunB.RegisterRoute(macOld, addrC)
+
+	// C 以 macNew 为源 MAC 发数据帧给 B。
+	frame := ethernet.BuildFrame(macB, macNew, ethernet.TypeIPv4, []byte("evict-me"))
+	if _, err := connC.WriteToUDP(frame, destB); err != nil {
+		t.Fatalf("C write: %v", err)
+	}
+	_ = tunB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := tunB.Read(); err != nil {
+		t.Fatalf("B read: %v", err)
+	}
+
+	routes := tunB.Routes()
+	if _, ok := routes[macOld.String()]; ok {
+		t.Fatalf("学习后旧 MAC 键未被驱逐: %v", routes)
+	}
+	if got := routes[macNew.String()]; got != addrC.String() {
+		t.Fatalf("未学到新路由: got=%v want=%s", got, addrC)
+	}
+}
+
+// TunnelProbeC: 构造一个带 Read 循环的隧道，用于 ProbeRoute 测试中对端自动回探测。
+func newBareTunnel(t *testing.T) *Tunnel {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	tun := &Tunnel{
+		conn:       conn,
+		done:       make(chan struct{}),
+		routes:     make(map[string]*net.UDPAddr),
+		addrs:      make(map[string]*net.UDPAddr, 8),
+		probeReply: make(map[string]time.Time, 8),
+	}
+	return tun
+}
+
+// readLoop 持续读取并吞掉数据帧（触发 addPeer/探测回复），隧道关闭后退出。
+func readLoop(t *testing.T, tun *Tunnel) {
+	t.Helper()
+	go func() {
+		for {
+			if _, err := tun.Read(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// 隧道存活但对端从未在打洞窗口内回过包：主动探测应拿到直连路由。
+// 回归缺陷 B：旧实现仅靠 KnownAddr 动态注册，后上线/重连的 peer 永远无路由。
+func TestProbeRouteRegistersMissingPeer(t *testing.T) {
+	tunA, _, macA, _ := punchPair(t)
+	defer tunA.Close()
+	macC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0xcc, 0x02}
+	_ = macA
+
+	tunC := newBareTunnel(t)
+	defer tunC.Close()
+	addrC := tunC.conn.LocalAddr().(*net.UDPAddr)
+
+	// 双方都要有 Read 循环：A 的循环把 C 的回包记入 addrs（KnownAddr），
+	// C 的循环收到探测后按限速原路回复，同时捕获数据帧用于断言。
+	frames := make(chan []byte, 8)
+	go func() {
+		for {
+			buf, err := tunC.Read()
+			if err != nil {
+				return
+			}
+			select {
+			case frames <- buf:
+			default:
+			}
+		}
+	}()
+	readLoop(t, tunA)
+
+	if tunA.HasRoute(macC) {
+		t.Fatal("预置条件不成立：A 已有 macC 路由")
+	}
+	if !tunA.ProbeRoute(macC, []*net.UDPAddr{addrC}, 3*time.Second) {
+		t.Fatal("ProbeRoute 未能在超时内注册路由")
+	}
+	if got := tunA.Routes()[macC.String()]; got != addrC.String() {
+		t.Fatalf("注册的地址错误: got=%v want=%s", got, addrC)
+	}
+
+	// 数据面验证：A 向 macC 发帧应直达 C。
+	frame := ethernet.BuildFrame(macC, macA, ethernet.TypeIPv4, []byte("direct-after-probe"))
+	if err := tunA.Write(frame); err != nil {
+		t.Fatalf("A write: %v", err)
+	}
+	select {
+	case got := <-frames:
+		if !bytes.Equal(got, frame) {
+			t.Fatalf("C 收到 %v want %v", got, frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("C 未收到 A 的直连帧")
+	}
+}
+
+// 探测无应答时按时返回 false，不卡死。
+func TestProbeRouteTimeoutNoReply(t *testing.T) {
+	tunA, _, _, _ := punchPair(t)
+	defer tunA.Close()
+	readLoop(t, tunA)
+
+	// 无人监听的端口。
+	dead := mustUDPAddr(t, "127.0.0.1", 1)
+	macC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0xcc, 0x03}
+	start := time.Now()
+	if tunA.ProbeRoute(macC, []*net.UDPAddr{dead}, 400*time.Millisecond) {
+		t.Fatal("无应答的探测不应成功")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("超时耗时过长: %v", d)
+	}
+	if tunA.HasRoute(macC) {
+		t.Fatal("失败时不应注册路由")
+	}
+}
+
+// 数据帧收发计数（探测/保活不计入）。
+func TestTunnelFrameCounters(t *testing.T) {
+	tunA, tunB, macA, macB := punchPair(t)
+	defer tunA.Close()
+	defer tunB.Close()
+
+	send := func() []byte {
+		f := ethernet.BuildFrame(macB, macA, ethernet.TypeIPv4, []byte("count-me"))
+		if err := tunA.Write(f); err != nil {
+			t.Fatalf("A write: %v", err)
+		}
+		return f
+	}
+	f1 := send()
+	_ = tunB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := tunB.Read(); err != nil {
+		t.Fatalf("B read: %v", err)
+	}
+
+	if n := tunA.TxFrames(); n != 1 {
+		t.Fatalf("TxFrames=%d want 1", n)
+	}
+	if n := tunB.RxFrames(); n != 1 {
+		t.Fatalf("RxFrames=%d want 1", n)
+	}
+
+	send() // 第二帧不读，仅看发送计数
+	if n := tunA.TxFrames(); n != 2 {
+		t.Fatalf("TxFrames=%d want 2", n)
+	}
+	if n := tunB.RxFrames(); n != 1 {
+		t.Fatalf("RxFrames=%d want 1（未读第二帧）", n)
+	}
+	_ = f1
+}

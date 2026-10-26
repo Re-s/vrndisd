@@ -198,6 +198,8 @@ type ClientP2PStatus struct {
 	LastTxAgo string            `json:"last_tx_ago,omitempty"` // 距上次发出数据
 	LastFail  string            `json:"last_fail,omitempty"`   // 上一轮打洞失败原因
 	Routes    map[string]string `json:"routes,omitempty"`      // 已直连对端 MAC -> UDP 地址
+	TxFrames  uint64            `json:"tx_frames,omitempty"`   // 隧道发出的数据帧数（探测/保活除外）
+	RxFrames  uint64            `json:"rx_frames,omitempty"`   // 隧道收到的数据帧数（探测/保活除外）
 }
 
 // CustomClientInfo for JSON

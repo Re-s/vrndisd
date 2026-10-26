@@ -50,6 +50,10 @@ type Config struct {
 
 	// 日志级别：debug/info/warn/error（默认 info）。
 	LogLevel string
+
+	// LeaseFile 租约簿路径：按客户端 name 持久化 IP/MAC，服务器重启后
+	// 同一客户端重连复用原租约，MAC 不随连接顺序漂移。为空时禁用。
+	LeaseFile string
 }
 
 // DefaultConfig 默认配置。
@@ -95,6 +99,7 @@ type Server struct {
 	cfg    Config
 	dev    tap.Device
 	pool   *addr.Pool
+	leases *leaseBook
 	sw     *ethswitch.LearningSwitch
 	tapMAC net.HardwareAddr
 	ln     net.Listener
@@ -255,6 +260,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		cfg:        cfg,
 		pool:       pool,
+		leases:     loadLeaseBook(cfg.LeaseFile),
 		sw:         ethswitch.New(),
 		tapMAC:     tapMAC,
 		ln:         ln,
@@ -517,6 +523,31 @@ func (s *Server) getManagementClientInfo() []proto.ClientInfo {
 
 // ---- 内部 ----
 
+// allocateLease 为新连接分配租约：name 非空且租约簿有记录时优先复用原
+// IP/MAC（跨服务器重启稳定）；记录的地址已被占用或无记录时回退顺序分配，
+// 后者同时登记/更新租约簿。分配失败时返回 nil（调用方应关闭连接）。
+func (s *Server) allocateLease(name, peer string) *addr.Lease {
+	if name != "" {
+		if ip, mac, ok := s.leases.lookup(name); ok {
+			if l, err := s.pool.AllocateSpecific(ip, mac); err == nil {
+				s.logger.Infof("vrndis server: 复用租约 %s -> %s (%s)", name, l.IP, l.MAC)
+				return l
+			}
+			// 记录的地址被占用（同名冲突/漂移）：顺序分配，
+			// 记录随后更新到该 name 的当前实际租约。
+		}
+	}
+	l, err := s.pool.Allocate()
+	if err != nil {
+		s.logger.Warnf("vrndis server: 无法为 %s 分配地址: %v", peer, err)
+		return nil
+	}
+	if name != "" {
+		s.leases.record(name, l)
+	}
+	return l
+}
+
 func (s *Server) acceptLoop() {
 	defer s.wg.Done()
 	for {
@@ -561,9 +592,41 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		s.logger.Infof("vrndis server: 加密连接建立 %s", peer)
 	}
-	lease, err := s.pool.Allocate()
+	// 先读首条消息拿到客户端 name，再分配地址：客户端建立后立即发 Hello，
+	// 此处不改变协议，仅把读取时机提前以支持按 name 复用原租约。
+	// 首条消息带 15s 截点：从不发数据的对端不应永久占用读取 goroutine。
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	firstMsg, err := proto.ReadMessage(conn)
+	conn.SetReadDeadline(time.Time{})
 	if err != nil {
-		s.logger.Warnf("vrndis server: 无法为 %s 分配地址: %v", peer, err)
+		s.logger.Infof("vrndis server: 等待 %s 的首条消息失败: %v", peer, err)
+		conn.Close()
+		return
+	}
+	if sec != nil && len(firstMsg.Body) > 0 {
+		plain, decErr := sec.Decrypt(firstMsg.Body)
+		if decErr != nil {
+			s.logger.Errorf("vrndis server: 解密失败 %s: %v", peer, decErr)
+			conn.Close()
+			return
+		}
+		if len(plain) == 0 {
+			s.logger.Errorf("vrndis server: 解密得到空数据 %s", peer)
+			conn.Close()
+			return
+		}
+		firstMsg.Type = plain[0]
+		firstMsg.Body = plain[1:]
+	}
+	var firstName string
+	if firstMsg.Type == proto.TypeHello {
+		var hello proto.Hello
+		if json.Unmarshal(firstMsg.Body, &hello) == nil {
+			firstName = hello.Name
+		}
+	}
+	lease := s.allocateLease(firstName, peer)
+	if lease == nil {
 		conn.Close()
 		return
 	}
@@ -615,11 +678,19 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	s.logger.Infof("vrndis server: 客户端接入 %s -> 分配 %s (%s)", peer, lease.IP, lease.MAC)
 
+	first := true // 首条消息已在分配租约前读出，先处理它再继续读流
 	for {
-		msg, err := proto.ReadMessage(conn)
-		if err != nil {
-			s.logger.Infof("vrndis server: 客户端 %s 断开: %v", peer, err)
-			return
+		var msg proto.Message
+		if first {
+			msg = firstMsg
+			first = false
+		} else {
+			var rerr error
+			msg, rerr = proto.ReadMessage(conn)
+			if rerr != nil {
+				s.logger.Infof("vrndis server: 客户端 %s 断开: %v", peer, rerr)
+				return
+			}
 		}
 		if sess.crypto != nil && len(msg.Body) > 0 {
 			plain, decErr := sess.crypto.Decrypt(msg.Body)

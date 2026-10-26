@@ -13,6 +13,9 @@ import (
 // ErrExhausted 地址池耗尽。
 var ErrExhausted = errors.New("github.com/Re-s/vrndisd/addr: address pool exhausted")
 
+// ErrNotFree 指定复用的地址不在池内或已被占用（应回退到 Allocate）。
+var ErrNotFree = errors.New("github.com/Re-s/vrndisd/addr: requested address not available")
+
 // Lease 一次地址租约。
 type Lease struct {
 	IP       net.IP
@@ -89,6 +92,52 @@ func (p *Pool) Allocate() (*Lease, error) {
 		ClientID: id,
 	}
 	p.leases[ip.String()] = l
+	return l, nil
+}
+
+// AllocateSpecific 按指定的 IP 与 MAC 分配租约：客户端重连时复用原租约，
+// 保证同一客户端的 IP/MAC 跨服务器重启保持稳定（MAC 不再随连接顺序漂移）。
+//
+// 约束：IP 必须在池内且当前空闲（被别的客户端占用时返回 ErrNotFree，
+// 调用方应回退 Allocate）；nextID 推进到超过该 MAC 的编码值，尽量避免
+// 后续 Allocate 生成相同 MAC。
+func (p *Pool) AllocateSpecific(ip net.IP, mac net.HardwareAddr) (*Lease, error) {
+	if len(mac) != 6 {
+		return nil, errors.New("github.com/Re-s/vrndisd/addr: bad MAC length")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ip4 := ip.To4()
+	if ip4 == nil || !p.network.Contains(ip4) || isBroadcast(ip4, p.network) || ip4.Equal(p.gateway) {
+		return nil, ErrNotFree
+	}
+	key := ip4.String()
+	if _, busy := p.leases[key]; busy {
+		return nil, ErrNotFree
+	}
+	idx := -1
+	for i, f := range p.free {
+		if f.Equal(ip4) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, ErrNotFree
+	}
+	p.free = append(p.free[:idx], p.free[idx+1:]...)
+	last := int(mac[5])
+	if last >= int(p.nextID) {
+		p.nextID = uint64(last) + 1
+	}
+	l := &Lease{
+		IP:       append(net.IP(nil), ip4...),
+		Prefix:   p.prefix,
+		MAC:      append(net.HardwareAddr(nil), mac...),
+		Gateway:  append(net.IP(nil), p.gateway...),
+		ClientID: uint64(last),
+	}
+	p.leases[key] = l
 	return l, nil
 }
 

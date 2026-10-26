@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Re-s/vrndisd/internal/ethernet"
@@ -94,6 +95,11 @@ type Tunnel struct {
 	// 用于抑制"收到探测即回复"造成的乒乓自激与反射放大。
 	probeReply   map[string]time.Time
 	probeReplyMu sync.Mutex
+
+	// txFrames/rxFrames count data frames only (probe/keepalive excluded),
+	// for management-plane diagnostics of the route-correct-but-relaying case.
+	txFrames atomic.Uint64
+	rxFrames atomic.Uint64
 }
 
 // Punch 向 peerCandidates 打洞：持续向候选地址发送探测包，并等待收到对端探测。
@@ -253,7 +259,30 @@ func (t *Tunnel) RegisterRoute(mac net.HardwareAddr, addr *net.UDPAddr) {
 		t.routes = make(map[string]*net.UDPAddr)
 	}
 	a := *addr
-	t.routes[mac.String()] = &a
+	evictMac := mac.String()
+	t.evictByAddrLocked(evictMac, &a)
+	t.routes[evictMac] = &a
+}
+
+// evictByAddrLocked drops route entries pointing at addr whose MAC differs
+// from excludeMac. The server assigns MACs in session order, so after a peer
+// reconnects it can inherit a MAC previously used by another peer, while local
+// routes (MAC -> addr) survive across reconnects. A stale (oldMAC -> addr)
+// entry would deliver frames destined for the new MAC to addr, whose tenant is
+// now someone else. Registering a fresh mapping evicts by address: one address
+// belongs only to the current MAC.
+func (t *Tunnel) evictByAddrLocked(excludeMac string, addr *net.UDPAddr) {
+	if addr == nil {
+		return
+	}
+	for k, v := range t.routes {
+		if k == excludeMac {
+			continue
+		}
+		if v != nil && v.String() == addr.String() {
+			delete(t.routes, k)
+		}
+	}
 }
 
 // learnRoute 从收到的数据帧学习「源 MAC -> 来源 UDP 地址」路由。
@@ -278,10 +307,61 @@ func (t *Tunnel) learnRoute(frame []byte, from *net.UDPAddr) {
 		return // 已是最新条目，避免无谓写与读端抖动
 	}
 	a := *from
+	t.evictByAddrLocked(src, &a)
 	t.routes[src] = &a
 }
 
 // KnownAddr 该地址是否已验证可达（收到过它的包）。
+// ProbeRoute actively probes candidate addresses of a peer whose direct route is
+// missing, and registers the route once the peer answers. The peer's reply (any
+// packet from it) lands in addrs via addPeer in the Read loop; when a candidate
+// becomes KnownAddr we register it for the peer MAC.
+//
+// Covers the 'tunnel alive but peer never had a route' case: the old design only
+// registered routes for peers that answered during the original punch window
+// (KnownAddr was only true then), so peers that came up later or reconnected while
+// the tunnel lived never obtained a direct route. Probes travel over the tunnel
+// socket; the remote Read loop replies (rate-limited), letting both sides learn
+// each other. Returns false on timeout or tunnel close.
+func (t *Tunnel) ProbeRoute(mac net.HardwareAddr, addrs []*net.UDPAddr, timeout time.Duration) bool {
+	if mac == nil || len(addrs) == 0 {
+		return false
+	}
+	if t.HasRoute(mac) {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	try := time.NewTicker(200 * time.Millisecond)
+	defer try.Stop()
+	send := func() {
+		t.writeMu.Lock()
+		for _, a := range addrs {
+			if a != nil {
+				_, _ = t.conn.WriteToUDP(probeMagic, a)
+			}
+		}
+		t.writeMu.Unlock()
+	}
+	send()
+	for {
+		select {
+		case <-t.done:
+			return false
+		case <-try.C:
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		for _, a := range addrs {
+			if a != nil && t.KnownAddr(a) {
+				t.RegisterRoute(mac, a)
+				return true
+			}
+		}
+		send()
+	}
+}
+
 func (t *Tunnel) KnownAddr(addr *net.UDPAddr) bool {
 	if addr == nil {
 		return false
@@ -315,6 +395,14 @@ func (t *Tunnel) Routes() map[string]string {
 }
 
 // Peers 返回全部已验证对端地址快照（管理面诊断与保活用）。
+// TxFrames returns the number of data frames sent over the tunnel
+// (probe/keepalive packets excluded).
+func (t *Tunnel) TxFrames() uint64 { return t.txFrames.Load() }
+
+// RxFrames returns the number of data frames received over the tunnel
+// (probe/keepalive packets excluded).
+func (t *Tunnel) RxFrames() uint64 { return t.rxFrames.Load() }
+
 func (t *Tunnel) Peers() []*net.UDPAddr {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -404,6 +492,7 @@ func (t *Tunnel) Read() ([]byte, error) {
 		// 数据帧自带源 MAC：从实际流量学习「源 MAC -> 来源地址」路由，
 		// 即时自愈候选过期/地址漂移导致的单向通。
 		t.learnRoute(frame, from)
+		t.rxFrames.Add(1)
 		return frame, nil
 	}
 }
@@ -462,6 +551,7 @@ func (t *Tunnel) Write(frame []byte) error {
 	_, err = t.conn.WriteToUDP(frame, addr)
 	if err == nil {
 		t.touchTx()
+		t.txFrames.Add(1)
 	}
 	return err
 }

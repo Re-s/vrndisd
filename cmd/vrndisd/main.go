@@ -721,9 +721,13 @@ func cmdServer(args []string) error {
 	psk := fs.String("psk", "", "预共享密钥（非空时要求客户端加密握手）")
 	mgmtListen := fs.String("management-listen", "", "本机管理端口（默认 127.0.0.1:7790，- 禁用）")
 	logLevel := fs.String("log-level", "", "日志级别 debug/info/warn/error（默认 info；debug 含逐帧事件，弱网会刷屏）")
+	leaseFile := fs.String("lease-file", "", "按 name 持久化租约的文件路径（服务器重启后客户端复用原 IP/MAC；留空禁用）")
 	fs.Parse(args)
 	if *mgmtListen != "" {
 		cfg.ManagementListen = *mgmtListen
+	}
+	if *leaseFile != "" {
+		cfg.LeaseFile = *leaseFile
 	}
 	if *logLevel != "" {
 		if _, err := loglevel.ParseLevel(*logLevel); err != nil {
@@ -878,6 +882,7 @@ func cmdService(args []string) error {
 	psk := fs.String("psk", "", "预共享密钥（非空时启用加密握手，server/client 通用）")
 	mgmtListen := fs.String("management-listen", "", "本机管理端口（默认 127.0.0.1:7790，同机多实例自动避让，- 禁用）")
 	logLevel := fs.String("log-level", "", "日志级别 debug/info/warn/error（默认 info；debug 含逐帧事件，弱网会刷屏）")
+	leaseFile := fs.String("lease-file", "", "server: 按 name 持久化租约的文件路径（重启后客户端复用原 IP/MAC；留空禁用）")
 	output := fs.String("output", "", "export: 写入的目标文件（默认打印到 stdout）")
 	printCfg := fs.Bool("print-config", false, "install: 仅打印将写入的配置 JSON，不安装服务")
 	fs.Parse(args[1:])
@@ -939,6 +944,8 @@ func cmdService(args []string) error {
 				cfg.ManagementListen = *mgmtListen
 			case "log-level":
 				cfg.LogLevel = *logLevel
+			case "lease-file":
+				cfg.LeaseFile = *leaseFile
 			}
 		})
 		if err := cfg.Validate(); err != nil {
@@ -1075,6 +1082,7 @@ func cmdServiceRun(args []string, globalCfg string) error {
 				PSK:              []byte(cfg.PSK),
 				ManagementListen: cfg.ManagementListen,
 				LogLevel:         cfg.LogLevel,
+				LeaseFile:        cfg.LeaseFile,
 			})
 			if err != nil {
 				return err

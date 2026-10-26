@@ -72,6 +72,10 @@ type Config struct {
 	// 服务器侧：本机管理监听地址（clients/status 命令查询用，无需 PSK）
 	ManagementListen string `json:"management_listen,omitempty"`
 
+	// 服务器侧：按客户端 name 持久化的租约簿文件路径。
+	// 服务器重启后同一客户端重连复用原 IP/MAC，MAC 不再随连接顺序漂移。
+	LeaseFile string `json:"lease_file,omitempty"`
+
 	// 日志级别：debug/info/warn/error（默认 info）。
 	// debug 含数据面逐帧事件（背压丢帧、动态路由注册），弱网下会刷屏。
 	LogLevel string `json:"log_level,omitempty"`

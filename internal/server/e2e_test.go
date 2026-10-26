@@ -4,6 +4,8 @@ package server_test
 import (
 	"fmt"
 	"net"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,4 +269,153 @@ func payloadOf(t *testing.T, frame []byte) []byte {
 		t.Fatal(err)
 	}
 	return f.Payload
+}
+
+// ---- 缺陷 A 回归：服务器重启后 MAC/IP 按 name 粘稳定 ----
+
+func TestStickyLeaseAcrossServerRestart(t *testing.T) {
+	leaseFile := filepath.Join(t.TempDir(), "leases.json")
+	network, gateway := randTestNetwork()
+
+	var clients []*client.Client
+	connect := func(srv *server.Server, name string) *proto.Assignment {
+		t.Helper()
+		c := client.New(client.Config{
+			Server: fmt.Sprintf("127.0.0.1:%d", srv.Port()),
+			Name:   name,
+			Device: tap.NewFake(name),
+		})
+		a, err := c.Connect()
+		if err != nil {
+			t.Fatalf("客户端 %s 连接失败: %v", name, err)
+		}
+		clients = append(clients, c)
+		return a
+	}
+	stopAll := func(srv *server.Server) {
+		for _, c := range clients {
+			c.Stop()
+		}
+		clients = nil
+		waitUntil(t, 2*time.Second, func() bool { return srv.SessionCount() == 0 })
+	}
+
+	mkServer := func() *server.Server {
+		srv, err := server.New(server.Config{
+			Listen:    "127.0.0.1:0",
+			Network:   network,
+			Gateway:   gateway,
+			TapMAC:    "02:00:00:00:00:00",
+			Device:    tap.NewFake("srv"),
+			P2P:       true,
+			LeaseFile: leaseFile,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return srv
+	}
+
+	// 第一周期：devA/devB 顺序接入。
+	srv := mkServer()
+	a1 := connect(srv, "devA")
+	b1 := connect(srv, "devB")
+	if a1.IP == b1.IP || a1.MAC == b1.MAC {
+		t.Fatalf("同周期地址不应重复: %+v %+v", a1, b1)
+	}
+	stopAll(srv)
+	srv.Stop()
+
+	// 第二周期：重启服务器，且故意反转接入顺序——
+	// 无粘滞时 devB 会先拿到 devA 的 MAC（缺陷 A 现象）。
+	srv = mkServer()
+	defer srv.Stop()
+	b2 := connect(srv, "devB")
+	a2 := connect(srv, "devA")
+	if a2.IP != a1.IP || a2.MAC != a1.MAC {
+		t.Fatalf("devA 租约漂移: 旧 %s/%s 新 %s/%s", a1.IP, a1.MAC, a2.IP, a2.MAC)
+	}
+	if b2.IP != b1.IP || b2.MAC != b1.MAC {
+		t.Fatalf("devB 租约漂移: 旧 %s/%s 新 %s/%s", b1.IP, b1.MAC, b2.IP, b2.MAC)
+	}
+	// 全新客户端仍走顺序分配。
+	c2 := connect(srv, "devC")
+	if c2.IP == a2.IP || c2.IP == b2.IP {
+		t.Fatalf("新客户端不应复用占用中的地址: %s", c2.IP)
+	}
+}
+
+// 同名并发连接：各拿不同 IP/MAC，服务器不崩、会话各自存活。
+func TestSameNameConcurrentClients(t *testing.T) {
+	leaseFile := filepath.Join(t.TempDir(), "leases.json")
+	srvDev := tap.NewFake("srv")
+	network, gateway := randTestNetwork()
+	srv, err := server.New(server.Config{
+		Listen:    "127.0.0.1:0",
+		Network:   network,
+		Gateway:   gateway,
+		TapMAC:    "02:00:00:00:00:00",
+		Device:    srvDev,
+		P2P:       true,
+		LeaseFile: leaseFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	connected := make(chan *proto.Assignment, 2)
+	errs := make(chan error, 2)
+	var mu sync.Mutex
+	var conns []*client.Client
+	for i := 0; i < 2; i++ {
+		go func() {
+			c := client.New(client.Config{
+				Server: fmt.Sprintf("127.0.0.1:%d", srv.Port()),
+				Name:   "same-name",
+				Device: tap.NewFake("same"),
+			})
+			a, err := c.Connect()
+			if err != nil {
+				errs <- err
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+			connected <- a
+			select {} // 保持连接不断开
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var assigns []*proto.Assignment
+	for len(assigns) < 2 && time.Now().Before(deadline) {
+		select {
+		case a := <-connected:
+			assigns = append(assigns, a)
+		case err := <-errs:
+			t.Fatalf("同名客户端连接失败: %v", err)
+		case <-time.After(time.Until(deadline)):
+		}
+	}
+	defer func() {
+		mu.Lock()
+		for _, c := range conns {
+			go c.Stop()
+		}
+		mu.Unlock()
+	}()
+	if len(assigns) != 2 {
+		t.Fatalf("应有两个同名会话，got %d", len(assigns))
+	}
+	if assigns[0].IP == assigns[1].IP || assigns[0].MAC == assigns[1].MAC {
+		t.Fatalf("同名客户端地址重复: %+v vs %+v", assigns[0], assigns[1])
+	}
+	waitUntil(t, 2*time.Second, func() bool { return srv.SessionCount() == 2 })
 }

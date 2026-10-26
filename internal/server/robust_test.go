@@ -127,6 +127,10 @@ func TestGarbageHelloTolerated(t *testing.T) {
 	s := newStack(t)
 	conn := rawDial(t, s.srv.Port())
 	defer conn.Close()
+	// 首条消息即为垃圾 Hello 体：分配不应被阻断（name 解析失败按匿名走顺序分配）。
+	if err := proto.WriteMessage(conn, proto.TypeHello, []byte("not-json{{{")); err != nil {
+		t.Fatal(err)
+	}
 	readAssign(t, conn)
 	if err := proto.WriteMessage(conn, proto.TypeHello, []byte("not-json{{{")); err != nil {
 		t.Fatal(err)
@@ -149,6 +153,7 @@ func TestGarbageHelloTolerated(t *testing.T) {
 func TestOversizedMessageKillsOnlyThatSession(t *testing.T) {
 	s := newStack(t)
 	conn := rawDial(t, s.srv.Port())
+	sayHello(t, conn)
 	readAssign(t, conn)
 
 	hdr := make([]byte, 5) // 伪造超长 header
@@ -448,6 +453,15 @@ func rawDial(t *testing.T, port int) net.Conn {
 		t.Fatal(err)
 	}
 	return conn
+}
+
+// sayHello 发送合法 Hello：新协议契约下服务器在分配地址前等待首条消息。
+func sayHello(t *testing.T, conn net.Conn) {
+	t.Helper()
+	body, _ := json.Marshal(proto.Hello{Version: proto.ProtocolVersion, Name: "raw"})
+	if err := proto.WriteMessage(conn, proto.TypeHello, body); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readAssign(t *testing.T, conn net.Conn) proto.Assignment {
