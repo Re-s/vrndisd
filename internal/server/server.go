@@ -533,8 +533,14 @@ func (s *Server) allocateLease(name, peer string) *addr.Lease {
 				s.logger.Infof("vrndis server: 复用租约 %s -> %s (%s)", name, l.IP, l.MAC)
 				return l
 			}
-			// 记录的地址被占用（同名冲突/漂移）：顺序分配，
-			// 记录随后更新到该 name 的当前实际租约。
+			// 记录的地址被暂借占用（诊断连接、同名另一会话）：顺序分配，
+			// 但保留原记录——占用者释放后该客户端下次重连即回到原租约。
+			l, err := s.pool.Allocate()
+			if err != nil {
+				s.logger.Warnf("vrndis server: 无法为 %s 分配地址: %v", peer, err)
+				return nil
+			}
+			return l
 		}
 	}
 	l, err := s.pool.Allocate()

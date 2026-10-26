@@ -434,8 +434,10 @@ func resolvePeerFlags(server, psk, name, cfgPath string) (string, string, string
 	if psk == "" {
 		psk = cfg.PSK
 	}
+	// 诊断/探测连接绝不能继承已安装客户端的 name：租约簿按 name 粘滞，
+	// 诊断连接顶用真名会抢占或改写真客户端的租约记录。
 	if name == "" {
-		name = cfg.Name
+		name = "diag"
 	}
 	return server, psk, name, nil
 }
