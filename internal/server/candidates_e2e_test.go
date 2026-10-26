@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/ctrl"
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/ctrl"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 func TestCandidateDistributionFilteredByEgress(t *testing.T) {

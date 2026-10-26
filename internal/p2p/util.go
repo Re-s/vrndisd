@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"net"
 
-	"vrndis/internal/stun/protocol"
+	"github.com/Re-s/vrndisd/internal/stun/protocol"
 )
 
 // random 用加密随机源填充 buf。

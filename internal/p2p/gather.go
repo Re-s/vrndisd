@@ -31,11 +31,11 @@ var lanIfPrefixes = []string{"docker", "br-", "veth", "virbr", "ovs-", "tunl", "
 // 且对多数客户端无独立可达价值。
 func HostCandidates(localPort int, excludeIP net.IP, tunnelNet *net.IPNet) ([]string, error) {
 	if localPort <= 0 || localPort > 65535 {
-		return nil, fmt.Errorf("vrndis/p2p: bad local port %d", localPort)
+		return nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: bad local port %d", localPort)
 	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return nil, fmt.Errorf("vrndis/p2p: list interfaces: %w", err)
+		return nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: list interfaces: %w", err)
 	}
 	var out []string
 	for _, ifc := range ifaces {

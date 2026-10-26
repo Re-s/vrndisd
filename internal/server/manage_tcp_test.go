@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/mgmt"
-	"vrndis/internal/proto"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/mgmt"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // mgmtTestServer 启动一个带管理端口（临时回环端口）的测试服务器。

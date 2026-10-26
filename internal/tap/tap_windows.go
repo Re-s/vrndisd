@@ -32,7 +32,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"vrndis/internal/tap/l2l3"
+	"github.com/Re-s/vrndisd/internal/tap/l2l3"
 )
 
 var (

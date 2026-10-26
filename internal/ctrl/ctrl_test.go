@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/crypto"
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/crypto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // runFakeServer 实现最小协议对端：Hello→Assign、Ping→Pong、

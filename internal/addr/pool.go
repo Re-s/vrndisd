@@ -7,11 +7,11 @@ import (
 	"net"
 	"sync"
 
-	"vrndis/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/ethernet"
 )
 
 // ErrExhausted 地址池耗尽。
-var ErrExhausted = errors.New("vrndis/addr: address pool exhausted")
+var ErrExhausted = errors.New("github.com/Re-s/vrndisd/addr: address pool exhausted")
 
 // Lease 一次地址租约。
 type Lease struct {
@@ -41,11 +41,11 @@ func New(network, gateway string) (*Pool, error) {
 	}
 	ip4 := ipnet.IP.To4()
 	if ip4 == nil {
-		return nil, errors.New("vrndis/addr: only IPv4 networks are supported")
+		return nil, errors.New("github.com/Re-s/vrndisd/addr: only IPv4 networks are supported")
 	}
 	ones, bits := ipnet.Mask.Size()
 	if bits != 32 {
-		return nil, errors.New("vrndis/addr: only IPv4 networks are supported")
+		return nil, errors.New("github.com/Re-s/vrndisd/addr: only IPv4 networks are supported")
 	}
 	gw := net.ParseIP(gateway).To4()
 	if gw == nil || !ipnet.Contains(gw) {

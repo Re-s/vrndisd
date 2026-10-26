@@ -6,7 +6,7 @@ import (
 	"net"
 	"sync"
 
-	"vrndis/internal/stun/protocol"
+	"github.com/Re-s/vrndisd/internal/stun/protocol"
 )
 
 type Config struct {

@@ -72,11 +72,11 @@ func MapPort(localPort int, logger *log.Logger) int {
 		logger = log.New(io.Discard, "", 0)
 	}
 	if port := tryUPnP(localPort, logger); port != 0 {
-		logger.Printf("vrndis/p2p: UPnP 映射成功 -> 外部端口 %d", port)
+		logger.Printf("github.com/Re-s/vrndisd/p2p: UPnP 映射成功 -> 外部端口 %d", port)
 		return port
 	}
 	if port := tryPMP(localPort, logger); port != 0 {
-		logger.Printf("vrndis/p2p: NAT-PMP 映射成功 -> 外部端口 %d", port)
+		logger.Printf("github.com/Re-s/vrndisd/p2p: NAT-PMP 映射成功 -> 外部端口 %d", port)
 		return port
 	}
 	return 0

@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"vrndis/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/ethernet"
 )
 
 func TestLearningAndForwarding(t *testing.T) {

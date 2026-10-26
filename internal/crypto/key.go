@@ -144,7 +144,7 @@ func hmacSHA256(key, data []byte) []byte {
 }
 
 var (
-	errSharedSecretSize = errors.New("vrndis/crypto: shared secret not 32 bytes")
-	errNotECDH          = errors.New("vrndis/crypto: public key is not an ECDH key")
-	errBadPublicKey     = errors.New("vrndis/crypto: public key must be 32 bytes")
+	errSharedSecretSize = errors.New("github.com/Re-s/vrndisd/crypto: shared secret not 32 bytes")
+	errNotECDH          = errors.New("github.com/Re-s/vrndisd/crypto: public key is not an ECDH key")
+	errBadPublicKey     = errors.New("github.com/Re-s/vrndisd/crypto: public key must be 32 bytes")
 )

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 func quietProvider() proto.ManagementState {

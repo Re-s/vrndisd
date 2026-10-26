@@ -20,7 +20,7 @@ import (
 	"net"
 	"time"
 
-	"vrndis/internal/stun/protocol"
+	"github.com/Re-s/vrndisd/internal/stun/protocol"
 )
 
 // maxRetries 单个目的地重试次数（提高 NAT 丢包下的成功率）。
@@ -54,11 +54,11 @@ type probe struct {
 // 同服务器第二端口，extra 为可选第三方 STUN。共享 socket 保证映射可比对。
 func Run(ctx context.Context, primary, secondary, extra string) (*Result, error) {
 	if primary == "" {
-		return nil, errors.New("vrndis/netcheck: primary STUN address is required")
+		return nil, errors.New("github.com/Re-s/vrndisd/netcheck: primary STUN address is required")
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return nil, fmt.Errorf("vrndis/netcheck: listen: %w", err)
+		return nil, fmt.Errorf("github.com/Re-s/vrndisd/netcheck: listen: %w", err)
 	}
 	defer conn.Close()
 

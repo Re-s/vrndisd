@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/proto"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // runSockToDev 向连接灌入 frames 帧数据（网卡队列满后逐帧触发背压），

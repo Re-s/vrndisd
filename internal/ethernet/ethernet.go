@@ -23,7 +23,7 @@ const (
 var Broadcast = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 // ErrFrame 无效帧。
-var ErrFrame = errors.New("vrndis/ethernet: malformed frame")
+var ErrFrame = errors.New("github.com/Re-s/vrndisd/ethernet: malformed frame")
 
 // Frame 解析后的以太网帧。
 type Frame struct {

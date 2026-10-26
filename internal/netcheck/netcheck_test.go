@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	stunserver "vrndis/internal/stun/server"
+	stunserver "github.com/Re-s/vrndisd/internal/stun/server"
 )
 
 // startSTUN 启动一个双端口内存 STUN 服务器，返回主/第二端口地址。

@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"vrndis/internal/stun/server"
+	"github.com/Re-s/vrndisd/internal/stun/server"
 )
 
 var Version = "dev"

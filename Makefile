@@ -1,7 +1,7 @@
 # vrndis-go Makefile
 BINARY_NAME = vrndisd
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS = -s -w -X main.Version=$(VERSION) -X vrndis/internal/server.Version=$(VERSION)
+LDFLAGS = -s -w -X main.Version=$(VERSION) -X github.com/Re-s/vrndisd/internal/server.Version=$(VERSION)
 
 .PHONY: all build-amd64 build-arm64 build-armv6 build-armv7 clean test
 

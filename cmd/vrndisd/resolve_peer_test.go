@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"vrndis/internal/service"
+	"github.com/Re-s/vrndisd/internal/service"
 )
 
 // withInstalledConfig 临时把 loadInstalledConfig 替换为返回指定配置，测试结束还原。

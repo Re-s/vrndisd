@@ -104,7 +104,7 @@ func (c *SecureConn) Encrypt(plaintext []byte) ([]byte, error) {
 	defer c.mu.Unlock()
 
 	if len(plaintext) == 0 {
-		return nil, errors.New("vrndis/crypto: empty plaintext")
+		return nil, errors.New("github.com/Re-s/vrndisd/crypto: empty plaintext")
 	}
 	seq := c.writeSeq
 	c.writeSeq++
@@ -128,14 +128,14 @@ func (c *SecureConn) Decrypt(frame []byte) ([]byte, error) {
 	defer c.mu.Unlock()
 
 	if len(frame) < 12 {
-		return nil, fmt.Errorf("vrndis/crypto: frame too short: %d", len(frame))
+		return nil, fmt.Errorf("github.com/Re-s/vrndisd/crypto: frame too short: %d", len(frame))
 	}
 	n := binary.BigEndian.Uint32(frame[:4])
 	if n > maxCipherLen {
-		return nil, errors.New("vrndis/crypto: ciphertext too large")
+		return nil, errors.New("github.com/Re-s/vrndisd/crypto: ciphertext too large")
 	}
 	if uint32(len(frame)-12) != n {
-		return nil, fmt.Errorf("vrndis/crypto: ciphertext length mismatch: declared %d, got %d", n, len(frame)-12)
+		return nil, fmt.Errorf("github.com/Re-s/vrndisd/crypto: ciphertext length mismatch: declared %d, got %d", n, len(frame)-12)
 	}
 	seq := binary.BigEndian.Uint64(frame[4:12])
 	ciphertext := frame[12:]
@@ -191,5 +191,5 @@ func (c *SecureConn) SetReadDeadline(t time.Time) error  { return c.conn.SetRead
 func (c *SecureConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
 
 var (
-	ErrReplay = errors.New("vrndis/crypto: replayed message")
+	ErrReplay = errors.New("github.com/Re-s/vrndisd/crypto: replayed message")
 )

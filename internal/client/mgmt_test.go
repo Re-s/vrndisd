@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // TestManagementStateBasic - 未连接实例的状态快照：role=client、无分配、计数为零。

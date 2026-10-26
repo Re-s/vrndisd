@@ -15,14 +15,14 @@ import (
 	"net"
 	"time"
 
-	"vrndis/internal/stun/protocol"
+	"github.com/Re-s/vrndisd/internal/stun/protocol"
 )
 
 // ErrPunchTimeout 打洞超时，NAT 无法打穿，应回退服务器中继。
-var ErrPunchTimeout = errors.New("vrndis/p2p: punch timeout, fall back to server relay")
+var ErrPunchTimeout = errors.New("github.com/Re-s/vrndisd/p2p: punch timeout, fall back to server relay")
 
 // ErrIdleTimeout UDP 隧道空闲超时，链路被认为失效，应回退。
-var ErrIdleTimeout = errors.New("vrndis/p2p: tunnel idle timeout")
+var ErrIdleTimeout = errors.New("github.com/Re-s/vrndisd/p2p: tunnel idle timeout")
 
 // Discover 通过 STUN 服务器获知本地 NAT 映射后的公网地址（XOR-MAPPED-ADDRESS）。
 // 返回的地址同时含公网 IP 与端口，供打洞时向对端通告。
@@ -36,7 +36,7 @@ var ErrIdleTimeout = errors.New("vrndis/p2p: tunnel idle timeout")
 func Discover(ctx context.Context, stunServer string, localPort int) (*net.UDPConn, *net.UDPAddr, error) {
 	saddr, err := net.ResolveUDPAddr("udp", stunServer)
 	if err != nil {
-		return nil, nil, fmt.Errorf("vrndis/p2p: resolve stun %q: %w", stunServer, err)
+		return nil, nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: resolve stun %q: %w", stunServer, err)
 	}
 	// localPort == 0 表示随机端口。绑定 IPv4 通配地址并强制 v4 socket：
 	// Go 的 ListenUDP("udp", ...) 即使给 IPv4zero 也会建 dual-stack
@@ -48,7 +48,7 @@ func Discover(ctx context.Context, stunServer string, localPort int) (*net.UDPCo
 	}
 	conn, err := net.ListenUDP("udp4", local)
 	if err != nil {
-		return nil, nil, fmt.Errorf("vrndis/p2p: listen: %w", err)
+		return nil, nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: listen: %w", err)
 	}
 
 	// 构造 Binding Request。
@@ -69,7 +69,7 @@ func Discover(ctx context.Context, stunServer string, localPort int) (*net.UDPCo
 	}
 	_ = conn.SetDeadline(dl)
 	if _, err := conn.WriteToUDP(req, saddr); err != nil {
-		return nil, nil, fmt.Errorf("vrndis/p2p: send stun: %w", err)
+		return nil, nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: send stun: %w", err)
 	}
 	buf := make([]byte, 65535)
 	for {
@@ -81,18 +81,18 @@ func Discover(ctx context.Context, stunServer string, localPort int) (*net.UDPCo
 				return nil, nil, ctx.Err()
 			default:
 			}
-			return nil, nil, fmt.Errorf("vrndis/p2p: stun read: %w", err)
+			return nil, nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: stun read: %w", err)
 		}
 		msg, err := protocol.Parse(buf[:n])
 		if err != nil || msg.TransactionID != tx {
 			continue // 忽略无关/重传的响应
 		}
 		if msg.Type != protocol.BindingResponse {
-			return nil, nil, fmt.Errorf("vrndis/p2p: unexpected stun type %d", msg.Type)
+			return nil, nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: unexpected stun type %d", msg.Type)
 		}
 		raw, ok := msg.Attributes[protocol.AttrXORMappedAddr]
 		if !ok {
-			return nil, nil, errors.New("vrndis/p2p: stun response missing XOR-MAPPED-ADDRESS")
+			return nil, nil, errors.New("github.com/Re-s/vrndisd/p2p: stun response missing XOR-MAPPED-ADDRESS")
 		}
 		// 清除读写截止：conn 交由打洞/隧道复用，残留的 write deadline
 		// 会在后续 Tunnel 数据写时立即报 i/o timeout。

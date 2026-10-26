@@ -1,8 +1,8 @@
 package server
 
 import (
+	"github.com/Re-s/vrndisd/internal/proto"
 	"testing"
-	"vrndis/internal/proto"
 )
 
 // TestClientInfoConversion 测试 ClientInfo 的转换逻辑

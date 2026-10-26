@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/stun/server"
+	"github.com/Re-s/vrndisd/internal/stun/server"
 )
 
 // TestServerStunFlagParsing 验证 server 子命令的 STUN 参数能被解析，且默认值正确。

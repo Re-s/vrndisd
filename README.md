@@ -1,6 +1,14 @@
 # vrndis-go —— 虚拟 RNDIS 隧道（Go 实现）
 
+[![CI](https://github.com/Re-s/vrndisd/actions/workflows/ci.yml/badge.svg)](https://github.com/Re-s/vrndisd/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Re-s/vrndisd)](https://goreportcard.com/report/github.com/Re-s/vrndisd)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Go 重写版：**单文件静态二进制**，性能更好、可交叉编译 Windows，内置**持久化服务配置工具**。
+
+> 基于 IP(TCP/UDP) 的虚拟 RNDIS 隧道：客户端连上服务器即获得分配地址，
+> 本机出现虚拟网卡并以太网帧透明传输。支持 PSK 加密、P2P 打洞直连、
+> 断线自愈与 systemd/Windows 服务化。代码纯标准库实现，无第三方依赖。
 
 ```
 客户端 --TCP(IP)--> 服务器：分配 IP/网关/DNS/MAC --> 本机出现虚拟网卡 --> 以太网帧透明传输

@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Re-s/vrndisd/internal/ethernet"
 	"time"
-	"vrndis/internal/ethernet"
 
-	stunserver "vrndis/internal/stun/server"
+	stunserver "github.com/Re-s/vrndisd/internal/stun/server"
 )
 
 func mustUDPAddr(t *testing.T, host string, port int) *net.UDPAddr {
@@ -508,7 +508,7 @@ func TestTunnelLearnsRouteFromDataFrame(t *testing.T) {
 	_ = macA
 
 	// C 扮演"地址漂移后的对端"：新 UDP socket，无候选、无打洞。
-	connC, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127,0,0,1), Port: 0})
+	connC, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("bind C: %v", err)
 	}

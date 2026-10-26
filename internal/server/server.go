@@ -13,14 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"vrndis/internal/addr"
-	"vrndis/internal/crypto"
-	"vrndis/internal/ethernet"
-	"vrndis/internal/ethswitch"
-	"vrndis/internal/loglevel"
-	"vrndis/internal/mgmt"
-	"vrndis/internal/proto"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/addr"
+	"github.com/Re-s/vrndisd/internal/crypto"
+	"github.com/Re-s/vrndisd/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/ethswitch"
+	"github.com/Re-s/vrndisd/internal/loglevel"
+	"github.com/Re-s/vrndisd/internal/mgmt"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 const tapPort = "tap"

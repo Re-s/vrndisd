@@ -99,7 +99,7 @@ func (t *linuxTAP) SetMAC(mac net.HardwareAddr) error {
 func (t *linuxTAP) SetIPv4(ip net.IP, prefix int) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
-		return fmt.Errorf("vrndis/tap: not an IPv4 address: %v", ip)
+		return fmt.Errorf("github.com/Re-s/vrndisd/tap: not an IPv4 address: %v", ip)
 	}
 	// SIOCSIFADDR: sockaddr_in {family u16, port u16, addr [4]byte}
 	var ifr [ifreqSize]byte
@@ -173,7 +173,7 @@ func (t *linuxTAP) AddDefaultRouteProtected(gateway, exclude net.IP) error {
 		if err := t.addExcludeRoute(exclude); err != nil {
 			// 排除失败不阻断默认路由安装（保持旧行为）；但调用方应知
 			// 此错误会埋下"隧道劫持自身连接"的隐患，故返回前记录到 stderr。
-			fmt.Fprintf(os.Stderr, "vrndis/tap: 排除服务器端点路由失败（默认路由仍将安装）: %v\n", err)
+			fmt.Fprintf(os.Stderr, "github.com/Re-s/vrndisd/tap: 排除服务器端点路由失败（默认路由仍将安装）: %v\n", err)
 		}
 	}
 	return t.AddDefaultRoute(gateway)

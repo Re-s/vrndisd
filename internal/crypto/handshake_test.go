@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // PSK 配置不一致是最常见的接入失败：一端带 --psk、另一端没带。

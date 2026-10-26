@@ -40,10 +40,10 @@ type Device interface {
 }
 
 // ErrUnsupported 平台不支持或缺少驱动。
-var ErrUnsupported = errors.New("vrndis/tap: unsupported platform or missing driver")
+var ErrUnsupported = errors.New("github.com/Re-s/vrndisd/tap: unsupported platform or missing driver")
 
 // ErrBufferFull Fake 网卡接收队列已满。
-var ErrBufferFull = errors.New("vrndis/tap: device buffer full")
+var ErrBufferFull = errors.New("github.com/Re-s/vrndisd/tap: device buffer full")
 
 // Fake 内存网卡（测试用）。
 //
@@ -83,20 +83,20 @@ func (f *Fake) Read() ([]byte, error) {
 	case frame := <-f.toTunnel:
 		return frame, nil
 	case <-f.closed:
-		return nil, errors.New("vrndis/tap: device closed")
+		return nil, errors.New("github.com/Re-s/vrndisd/tap: device closed")
 	}
 }
 
 func (f *Fake) Write(frame []byte) error {
 	if f.isClosed() {
-		return errors.New("vrndis/tap: device closed")
+		return errors.New("github.com/Re-s/vrndisd/tap: device closed")
 	}
 	buf := append([]byte(nil), frame...)
 	select {
 	case f.toApp <- buf:
 		return nil
 	case <-f.closed:
-		return errors.New("vrndis/tap: device closed")
+		return errors.New("github.com/Re-s/vrndisd/tap: device closed")
 	default:
 		return ErrBufferFull
 	}
@@ -152,7 +152,7 @@ func (f *Fake) Close() error {
 // Inject 模拟操作系统向网卡注入一帧（测试侧）。
 func (f *Fake) Inject(frame []byte) error {
 	if f.isClosed() {
-		return errors.New("vrndis/tap: device closed")
+		return errors.New("github.com/Re-s/vrndisd/tap: device closed")
 	}
 	// Inject 模拟操作系统向网卡注入帧，背压时阻塞（与真实 TAP 语义一致）；
 	// 测试侧注入方会在队列被隧道消费后继续注入。
@@ -161,7 +161,7 @@ func (f *Fake) Inject(frame []byte) error {
 	case f.toTunnel <- buf:
 		return nil
 	case <-f.closed:
-		return errors.New("vrndis/tap: device closed")
+		return errors.New("github.com/Re-s/vrndisd/tap: device closed")
 	}
 }
 
@@ -171,7 +171,7 @@ func (f *Fake) Capture() ([]byte, error) {
 	case frame := <-f.toApp:
 		return frame, nil
 	case <-f.closed:
-		return nil, errors.New("vrndis/tap: device closed")
+		return nil, errors.New("github.com/Re-s/vrndisd/tap: device closed")
 	}
 }
 

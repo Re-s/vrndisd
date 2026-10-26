@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/stun/protocol"
+	"github.com/Re-s/vrndisd/internal/stun/protocol"
 )
 
 // TestEncodeXORIPv4 验证真实 encodeXOR：能解回原始 IP/端口。

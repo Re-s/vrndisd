@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // DefaultListen 默认管理监听地址（仅本机回环，避免外网暴露）。
@@ -150,16 +150,16 @@ func (m *Server) tryListen(addr string, allowFallback bool) (net.Listener, strin
 		ln, listenErr := net.Listen("tcp", candidate)
 		if listenErr == nil {
 			if i > 0 {
-				m.logger.Printf("vrndis/mgmt: 管理端口 %s 被占用，改用 %s", addr, candidate)
+				m.logger.Printf("github.com/Re-s/vrndisd/mgmt: 管理端口 %s 被占用，改用 %s", addr, candidate)
 			}
 			return ln, ln.Addr().String()
 		}
 		if !isAddrInUse(listenErr) {
-			m.logger.Printf("vrndis/mgmt: 管理端口监听失败 %s: %v", addr, listenErr)
+			m.logger.Printf("github.com/Re-s/vrndisd/mgmt: 管理端口监听失败 %s: %v", addr, listenErr)
 			return nil, ""
 		}
 	}
-	m.logger.Printf("vrndis/mgmt: 管理端口 %s~%d 均被占用，%v 后重试", addr, port+portTries-1, watchInterval)
+	m.logger.Printf("github.com/Re-s/vrndisd/mgmt: 管理端口 %s~%d 均被占用，%v 后重试", addr, port+portTries-1, watchInterval)
 	return nil, ""
 }
 
@@ -167,7 +167,7 @@ func (m *Server) tryListen(addr string, allowFallback bool) (net.Listener, strin
 func (m *Server) listenAt(addr string) (net.Listener, string) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		m.logger.Printf("vrndis/mgmt: 管理端口监听失败 %s: %v", addr, err)
+		m.logger.Printf("github.com/Re-s/vrndisd/mgmt: 管理端口监听失败 %s: %v", addr, err)
 		return nil, ""
 	}
 	return ln, ln.Addr().String()

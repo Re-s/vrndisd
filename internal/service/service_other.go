@@ -10,7 +10,7 @@ import (
 )
 
 // ErrNoPlatform 当前平台无服务管理后端。
-var ErrNoPlatform = errors.New("vrndis/service: 此平台不支持服务管理（仅 Linux/Windows）")
+var ErrNoPlatform = errors.New("github.com/Re-s/vrndisd/service: 此平台不支持服务管理（仅 Linux/Windows）")
 
 type otherManager struct{}
 

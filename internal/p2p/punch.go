@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"vrndis/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/ethernet"
 )
 
-var errNoXORAddr = errors.New("vrndis/p2p: bad XOR-MAPPED-ADDRESS")
+var errNoXORAddr = errors.New("github.com/Re-s/vrndisd/p2p: bad XOR-MAPPED-ADDRESS")
 
 // maxUDPFrame 单个 UDP 数据报承载帧的最大字节数（覆盖标准以太网帧与常见 jumbo）。
 const maxUDPFrame = 9000
@@ -51,7 +51,7 @@ const punchCollectWindow = 2500 * time.Millisecond
 
 // ErrNoRoute 帧的目的 MAC 没有已注册的直连路由。
 // 调用方应改走 TCP 中继；这只是一个对端未直连，隧道本身与其他对端不受影响。
-var ErrNoRoute = errors.New("vrndis/p2p: no direct route for destination MAC")
+var ErrNoRoute = errors.New("github.com/Re-s/vrndisd/p2p: no direct route for destination MAC")
 
 // isProbe 判断一个数据报是否为打洞/保活探测帧。
 func isProbe(b []byte) bool {
@@ -103,7 +103,7 @@ func Punch(ctx context.Context, localPort int, peerCandidates []*net.UDPAddr) (*
 	local := &net.UDPAddr{IP: net.IPv4zero, Port: localPort}
 	conn, err := net.ListenUDP("udp4", local)
 	if err != nil {
-		return nil, fmt.Errorf("vrndis/p2p: listen punch: %w", err)
+		return nil, fmt.Errorf("github.com/Re-s/vrndisd/p2p: listen punch: %w", err)
 	}
 	return punchConn(ctx, conn, peerCandidates)
 }
@@ -446,7 +446,7 @@ func (t *Tunnel) LastTxTime() time.Time {
 func (t *Tunnel) Write(frame []byte) error {
 	f, err := ethernet.ParseFrame(frame)
 	if err != nil {
-		return fmt.Errorf("vrndis/p2p: bad frame: %w", err)
+		return fmt.Errorf("github.com/Re-s/vrndisd/p2p: bad frame: %w", err)
 	}
 	t.mu.Lock()
 	addr, ok := t.routes[f.Dst.String()]
@@ -455,7 +455,7 @@ func (t *Tunnel) Write(frame []byte) error {
 		return ErrNoRoute
 	}
 	if len(frame) > maxUDPFrame {
-		return errors.New("vrndis/p2p: frame too large")
+		return errors.New("github.com/Re-s/vrndisd/p2p: frame too large")
 	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
@@ -505,7 +505,7 @@ func (t *Tunnel) AttachIdleMonitor(idle time.Duration, logger *log.Logger) (canc
 			last := t.lastRx
 			t.lastRxMu.Unlock()
 			if !last.IsZero() && time.Since(last) > idle {
-				logger.Printf("vrndis/p2p: tunnel idle timeout, closing")
+				logger.Printf("github.com/Re-s/vrndisd/p2p: tunnel idle timeout, closing")
 				t.Close()
 				return
 			}

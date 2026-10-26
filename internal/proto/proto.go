@@ -46,8 +46,8 @@ const MaxBody = 256 * 1024
 const ProtocolVersion = 3
 
 var (
-	ErrTooLarge   = errors.New("vrndis/proto: message body too large")
-	ErrBadMessage = errors.New("vrndis/proto: malformed message")
+	ErrTooLarge   = errors.New("github.com/Re-s/vrndisd/proto: message body too large")
+	ErrBadMessage = errors.New("github.com/Re-s/vrndisd/proto: malformed message")
 )
 
 // Message 一条线路消息。

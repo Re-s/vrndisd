@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/client"
-	"vrndis/internal/ethernet"
-	"vrndis/internal/proto"
-	"vrndis/internal/server"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/client"
+	"github.com/Re-s/vrndisd/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/server"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // ---- 测试脚手架 ----

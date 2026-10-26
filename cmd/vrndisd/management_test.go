@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // fakeMgmtServer 启动管理端口模拟服务器：接受连接后读取 ManagementRequest，

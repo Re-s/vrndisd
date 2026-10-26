@@ -113,7 +113,7 @@ func (t *androidTAP) SetMAC(mac net.HardwareAddr) error {
 func (t *androidTAP) SetIPv4(ip net.IP, prefix int) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
-		return fmt.Errorf("vrndis/tap: not an IPv4 address: %v", ip)
+		return fmt.Errorf("github.com/Re-s/vrndisd/tap: not an IPv4 address: %v", ip)
 	}
 	addr := (&net.IPNet{IP: ip4, Mask: net.CIDRMask(prefix, 32)}).String()
 	_ = exec.Command("ip", "-4", "addr", "flush", "dev", t.name).Run()
@@ -163,7 +163,7 @@ func (t *androidTAP) Up() error {
 		if out, err := exec.Command("ip", "rule", "add", "to", t.subnet.String(),
 			"lookup", "main", "prio", "6091").CombinedOutput(); err != nil {
 			if !strings.Contains(string(out), "File exists") {
-				fmt.Fprintf(os.Stderr, "vrndis/tap: ip rule add (netd 绕过) 失败: %v (%s)\n", err, out)
+				fmt.Fprintf(os.Stderr, "github.com/Re-s/vrndisd/tap: ip rule add (netd 绕过) 失败: %v (%s)\n", err, out)
 			}
 		}
 	}

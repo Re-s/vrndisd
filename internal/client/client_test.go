@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/crypto"
-	"vrndis/internal/proto"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/crypto"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // fakeServer 内存服务器：accept 一条连接并执行 handler。

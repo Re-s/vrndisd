@@ -16,3 +16,10 @@ test_output/
 .DS_Store
 Thumbs.db
 vrndis-go-build-*.tar.gz
+# 本地产物与杂项
+/vrndisd
+/stun-server
+xfer.bin
+*.log
+*.bak
+*.wo

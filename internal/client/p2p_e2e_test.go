@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/ethernet"
-	"vrndis/internal/p2p"
-	"vrndis/internal/proto"
-	stunserver "vrndis/internal/stun/server"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/p2p"
+	"github.com/Re-s/vrndisd/internal/proto"
+	stunserver "github.com/Re-s/vrndisd/internal/stun/server"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // waitStunAddr 等待 STUN 服务器就绪并返回其监听地址。
@@ -378,7 +378,6 @@ func TestP2PConcurrentClients(t *testing.T) {
 	wg.Wait()
 	t.Logf("4 个并发 P2P 客户端验证通过")
 }
-
 
 // restart 模拟服务器重启：丢弃全部候选登记并断开所有客户端控制连接。
 // assigns 保留（按名字复用），保证重连客户端身份不变。

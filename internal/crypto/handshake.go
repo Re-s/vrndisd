@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"net"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // CryptoHello 握手第一条消息的 body（线路格式：len | type | body）。
@@ -42,7 +42,7 @@ type CryptoAck struct {
 }
 
 // ErrHandshake 握手失败。
-var ErrHandshake = errors.New("vrndis/crypto: handshake failed")
+var ErrHandshake = errors.New("github.com/Re-s/vrndisd/crypto: handshake failed")
 
 // ClientHandshake 作为客户端完成握手。
 //

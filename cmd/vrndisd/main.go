@@ -30,14 +30,14 @@ import (
 	"syscall"
 	"time"
 
-	"vrndis/internal/client"
-	"vrndis/internal/ctrl"
-	"vrndis/internal/loglevel"
-	"vrndis/internal/netcheck"
-	"vrndis/internal/proto"
-	"vrndis/internal/server"
-	"vrndis/internal/service"
-	stunserver "vrndis/internal/stun/server"
+	"github.com/Re-s/vrndisd/internal/client"
+	"github.com/Re-s/vrndisd/internal/ctrl"
+	"github.com/Re-s/vrndisd/internal/loglevel"
+	"github.com/Re-s/vrndisd/internal/netcheck"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/server"
+	"github.com/Re-s/vrndisd/internal/service"
+	stunserver "github.com/Re-s/vrndisd/internal/stun/server"
 )
 
 var Version = "dev"

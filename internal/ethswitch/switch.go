@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"vrndis/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/ethernet"
 )
 
 const (

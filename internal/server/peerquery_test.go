@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/ctrl"
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/ctrl"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // TestPeerQueryAnswersAllOnlineDevices 两个普通客户端（未开 P2P、无候选），

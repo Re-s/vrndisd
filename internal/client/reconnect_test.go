@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/proto"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // fakeServerMulti 接受 n 条连接，依次对每条连接执行 handler(t, conn, idx)。

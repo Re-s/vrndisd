@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"vrndis/internal/service"
+	"github.com/Re-s/vrndisd/internal/service"
 )
 
 // netcheck 缺省服务器解析：不指定 --server 时应自动取"连接的服务器"

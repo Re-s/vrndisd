@@ -8,7 +8,7 @@ import (
 )
 
 // ErrBadXORAddr XOR-MAPPED-ADDRESS 属性缺失或不是 IPv4 家族。
-var ErrBadXORAddr = errors.New("vrndis/proto: bad XOR-MAPPED-ADDRESS")
+var ErrBadXORAddr = errors.New("github.com/Re-s/vrndisd/proto: bad XOR-MAPPED-ADDRESS")
 
 type MsgType uint16
 type AttrType uint16

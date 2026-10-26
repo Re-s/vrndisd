@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/client"
-	"vrndis/internal/ethernet"
-	"vrndis/internal/proto"
-	"vrndis/internal/server"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/client"
+	"github.com/Re-s/vrndisd/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/server"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
 // ---- 1. 连接风暴：频繁上下线不得泄漏资源 ----

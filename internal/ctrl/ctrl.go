@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"vrndis/internal/crypto"
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/crypto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // Session 一条到服务器的控制信道。

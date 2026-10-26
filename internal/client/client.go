@@ -24,16 +24,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"vrndis/internal/crypto"
-	"vrndis/internal/ethernet"
-	"vrndis/internal/loglevel"
-	"vrndis/internal/mgmt"
-	"vrndis/internal/p2p"
-	"vrndis/internal/proto"
-	"vrndis/internal/tap"
+	"github.com/Re-s/vrndisd/internal/crypto"
+	"github.com/Re-s/vrndisd/internal/ethernet"
+	"github.com/Re-s/vrndisd/internal/loglevel"
+	"github.com/Re-s/vrndisd/internal/mgmt"
+	"github.com/Re-s/vrndisd/internal/p2p"
+	"github.com/Re-s/vrndisd/internal/proto"
+	"github.com/Re-s/vrndisd/internal/tap"
 )
 
-// Version 由构建脚本注入（-X vrndis/internal/client.Version=...）。
+// Version 由构建脚本注入（-X github.com/Re-s/vrndisd/internal/client.Version=...）。
 var Version = "dev"
 
 // 默认心跳参数。
@@ -458,7 +458,7 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) ([]*peerInfo, error) 
 	conn := c.conn
 	c.connMu.Unlock()
 	if conn == nil {
-		return nil, errors.New("vrndis/client: 无活跃连接，无法等待 peer 候选")
+		return nil, errors.New("github.com/Re-s/vrndisd/client: 无活跃连接，无法等待 peer 候选")
 	}
 
 	var out []*peerInfo
@@ -480,7 +480,7 @@ func (c *Client) waitForPeerCandidate(ctx context.Context) ([]*peerInfo, error) 
 			}
 			return nil, ctx.Err()
 		case <-c.stopCh:
-			return nil, errors.New("vrndis/client: 客户端已停止")
+			return nil, errors.New("github.com/Re-s/vrndisd/client: 客户端已停止")
 		case pi := <-c.peerCandCh:
 			if len(pi.Addrs) == 0 {
 				continue
@@ -976,7 +976,7 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		case <-c.connDone:
 			c.Stop()
-			return errors.New("vrndis/client: 连接关闭")
+			return errors.New("github.com/Re-s/vrndisd/client: 连接关闭")
 		}
 	}
 
@@ -995,7 +995,7 @@ func (c *Client) Run(ctx context.Context) error {
 			c.logger.Warnf("vrndis client: 连接失败（第 %d 次）: %v", failures, err)
 			if c.cfg.MaxRetries > 0 && failures >= c.cfg.MaxRetries {
 				c.Stop()
-				return fmt.Errorf("vrndis/client: 重连 %d 次仍失败: %w", failures, err)
+				return fmt.Errorf("github.com/Re-s/vrndisd/client: 重连 %d 次仍失败: %w", failures, err)
 			}
 		} else {
 			failures = 0

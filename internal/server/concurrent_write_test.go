@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"vrndis/internal/proto"
+	"github.com/Re-s/vrndisd/internal/proto"
 )
 
 // fakeMuxConn 模拟真实 TCP socket 的关键行为：单次 Write 原子，
