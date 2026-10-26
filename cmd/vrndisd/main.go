@@ -244,7 +244,7 @@ func cmdNetcheck(args []string) error {
 // 主/第二探测地址（host + 5478/5479）。端口推导与客户端 candidateAddr
 // 一致：STUN 挂在服务器公网 host 的固定端口，控制端口 7777 不作 STUN。
 func netcheckDefaultServer(cfgPath string) (primary, secondary string, err error) {
-	resolved, _, _, err := resolvePeerFlags("", "", "", cfgPath)
+	resolved, _, _, err := resolvePeerFlags("", "", "", cfgPath, true)
 	if err != nil {
 		return "", "", err
 	}
@@ -390,11 +390,14 @@ var loadInstalledConfig = func() (*service.Config, error) {
 	return service.Load(service.DefaultConfigPath())
 }
 
-// resolvePeerFlags 为 ping/peers/netcheck 解析服务器参数：优先命令行 flag，
-// 缺省回退到已安装服务配置（service install 写入 DefaultConfigPath），
+// resolvePeerFlags 为 ping/peers/netcheck/客户端补齐服务器参数：优先命令行
+// flag，缺省回退到已安装服务配置（service install 写入 DefaultConfigPath），
 // 实现"本机已配置客户端/服务器时免输 --server/--psk"。
 // server 模式配置回退到回环地址直连本机服务器。
-func resolvePeerFlags(server, psk, name, cfgPath string) (string, string, string, error) {
+// diag=true 为诊断/探测连接：绝不继承配置中的 name（租约簿按 name 粘滞，
+// 诊断连接顶用真名会抢占或改写真客户端的租约记录），无显式 name 时用 "diag"；
+// diag=false 为真实客户端：name 回退到配置值。
+func resolvePeerFlags(server, psk, name, cfgPath string, diag bool) (string, string, string, error) {
 	if server != "" && cfgPath == "" {
 		return server, psk, name, nil
 	}
@@ -434,10 +437,13 @@ func resolvePeerFlags(server, psk, name, cfgPath string) (string, string, string
 	if psk == "" {
 		psk = cfg.PSK
 	}
-	// 诊断/探测连接绝不能继承已安装客户端的 name：租约簿按 name 粘滞，
-	// 诊断连接顶用真名会抢占或改写真客户端的租约记录。
-	if name == "" {
-		name = "diag"
+	if diag {
+		// 诊断/探测连接：不继承配置 name，避免顶用真客户端的租约记录。
+		if name == "" {
+			name = "diag"
+		}
+	} else if name == "" {
+		name = cfg.Name
 	}
 	return server, psk, name, nil
 }
@@ -477,7 +483,7 @@ func cmdPing(args []string) error {
 	if len(positional) > 0 {
 		target = positional[0]
 	}
-	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name, *cfgPath)
+	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name, *cfgPath, true)
 	if err != nil {
 		return err
 	}
@@ -575,7 +581,7 @@ func cmdPeers(args []string) error {
 		return nil
 	}
 	parseLoose(fs, args)
-	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name, *cfgPath)
+	serverAddr, pskStr, nameStr, err := resolvePeerFlags(*server, *psk, *name, *cfgPath, true)
 	if err != nil {
 		return err
 	}
@@ -805,7 +811,7 @@ func cmdClient(args []string) error {
 	// 客户端模式取其 server 地址，服务器模式回环直连本机；psk/name 一并补齐。
 	// 未安装配置时 resolvePeerFlags 会报错并给出预置方法。
 	if cfg.Server == "" {
-		srv, pskStr, nameStr, err := resolvePeerFlags("", *psk, cfg.Name, "")
+		srv, pskStr, nameStr, err := resolvePeerFlags("", *psk, cfg.Name, "", false)
 		if err != nil {
 			return err
 		}

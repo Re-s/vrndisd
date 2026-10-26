@@ -19,7 +19,7 @@ func withInstalledConfig(t *testing.T, cfg *service.Config, loadErr error) {
 }
 
 func TestResolvePeerFlagsExplicitServer(t *testing.T) {
-	s, p, n, err := resolvePeerFlags("1.2.3.4:7777", "cli-psk", "cli-name", "")
+	s, p, n, err := resolvePeerFlags("1.2.3.4:7777", "cli-psk", "cli-name", "", true)
 	if err != nil || s != "1.2.3.4:7777" || p != "cli-psk" || n != "cli-name" {
 		t.Fatalf("显式 flag 应原样透传: got %q %q %q %v", s, p, n, err)
 	}
@@ -27,7 +27,7 @@ func TestResolvePeerFlagsExplicitServer(t *testing.T) {
 
 func TestResolvePeerFlagsNoConfig(t *testing.T) {
 	withInstalledConfig(t, nil, errors.New("no such file"))
-	_, _, _, err := resolvePeerFlags("", "", "", "")
+	_, _, _, err := resolvePeerFlags("", "", "", "", true)
 	if err == nil || !strings.Contains(err.Error(), "--server 必填") {
 		t.Fatalf("缺省且无配置应报 --server 必填: got %v", err)
 	}
@@ -43,15 +43,21 @@ func TestResolvePeerFlagsClientFallback(t *testing.T) {
 		PSK:    "cfg-psk",
 		Name:   "cfg-name",
 	}, nil)
-	s, p, n, err := resolvePeerFlags("", "", "", "")
+	// 诊断模式（diag=true）：server/psk 从配置补齐，name 不继承真名
+	s, p, n, err := resolvePeerFlags("", "", "", "", true)
+	if err != nil || s != "5.6.7.8:7777" || p != "cfg-psk" || n != "diag" {
+		t.Fatalf("client 配置回退(诊断)失败: got %q %q %q %v", s, p, n, err)
+	}
+	// 真实客户端（diag=false）：name 回退到配置值
+	s, p, n, err = resolvePeerFlags("", "", "", "", false)
 	if err != nil || s != "5.6.7.8:7777" || p != "cfg-psk" || n != "cfg-name" {
-		t.Fatalf("client 配置回退失败: got %q %q %q %v", s, p, n, err)
+		t.Fatalf("client 配置回退(客户端)失败: got %q %q %q %v", s, p, n, err)
 	}
 }
 
 func TestResolvePeerFlagsClientMissingServer(t *testing.T) {
 	withInstalledConfig(t, &service.Config{Mode: "client", Name: "x"}, nil)
-	_, _, _, err := resolvePeerFlags("", "", "", "")
+	_, _, _, err := resolvePeerFlags("", "", "", "", true)
 	if err == nil || !strings.Contains(err.Error(), "缺少 server 地址") {
 		t.Fatalf("client 无 server 应报错: got %v", err)
 	}
@@ -63,7 +69,7 @@ func TestResolvePeerFlagsServerModeLoopback(t *testing.T) {
 		Listen: "0.0.0.0:7777",
 		PSK:    "srv-psk",
 	}, nil)
-	s, p, n, err := resolvePeerFlags("", "", "", "")
+	s, p, n, err := resolvePeerFlags("", "", "", "", true)
 	if err != nil || s != "127.0.0.1:7777" || p != "srv-psk" {
 		t.Fatalf("server 模式应回环直连本机: got %q %q %q %v", s, p, n, err)
 	}
@@ -71,7 +77,7 @@ func TestResolvePeerFlagsServerModeLoopback(t *testing.T) {
 
 func TestResolvePeerFlagsCLIPskOverridesConfig(t *testing.T) {
 	withInstalledConfig(t, &service.Config{Mode: "client", Server: "5.6.7.8:7777", PSK: "cfg-psk"}, nil)
-	_, p, _, err := resolvePeerFlags("", "cli-psk", "", "")
+	_, p, _, err := resolvePeerFlags("", "cli-psk", "", "", true)
 	if err != nil || p != "cli-psk" {
 		t.Fatalf("命令行 --psk 应优先: got %q %v", p, err)
 	}
@@ -79,7 +85,7 @@ func TestResolvePeerFlagsCLIPskOverridesConfig(t *testing.T) {
 
 func TestResolvePeerFlagsBadMode(t *testing.T) {
 	withInstalledConfig(t, &service.Config{Mode: "bogus"}, nil)
-	_, _, _, err := resolvePeerFlags("", "", "", "")
+	_, _, _, err := resolvePeerFlags("", "", "", "", true)
 	if err == nil || !strings.Contains(err.Error(), "mode 无效") {
 		t.Fatalf("非法 mode 应报错: got %v", err)
 	}
@@ -111,19 +117,28 @@ func TestResolvePeerFlagsCustomConfig(t *testing.T) {
 	}
 	// 已安装配置"不存在"，自定义路径应优先生效
 	withInstalledConfig(t, nil, errors.New("no such file"))
-	s, p, n, err := resolvePeerFlags("", "", "", path)
-	if err != nil || s != "9.8.7.6:7777" || p != "file-psk" || n != "file-name" {
-		t.Fatalf("--config 回退失败: got %q %q %q %v", s, p, n, err)
+	s, p, n, err := resolvePeerFlags("", "", "", path, true)
+	if err != nil || s != "9.8.7.6:7777" || p != "file-psk" || n != "diag" {
+		t.Fatalf("--config 回退(诊断)失败: got %q %q %q %v", s, p, n, err)
 	}
-	// --server 与 --config 共存：flag 服务器优先，psk/name 仍从文件补齐
-	s, p, n, err = resolvePeerFlags("1.1.1.1:7777", "", "", path)
+	s, p, n, err = resolvePeerFlags("", "", "", path, false)
+	if err != nil || s != "9.8.7.6:7777" || p != "file-psk" || n != "file-name" {
+		t.Fatalf("--config 回退(客户端)失败: got %q %q %q %v", s, p, n, err)
+	}
+	// --server 与 --config 共存：flag 服务器优先，psk 从文件补齐；
+	// 诊断模式 name 仍不继承配置真名
+	s, p, n, err = resolvePeerFlags("1.1.1.1:7777", "", "", path, true)
+	if err != nil || s != "1.1.1.1:7777" || p != "file-psk" || n != "diag" {
+		t.Fatalf("flag 服务器应覆盖配置(诊断)失败: got %q %q %q %v", s, p, n, err)
+	}
+	s, p, n, err = resolvePeerFlags("1.1.1.1:7777", "", "", path, false)
 	if err != nil || s != "1.1.1.1:7777" || p != "file-psk" || n != "file-name" {
-		t.Fatalf("flag 服务器应覆盖配置: got %q %q %q %v", s, p, n, err)
+		t.Fatalf("flag 服务器应覆盖配置(客户端)失败: got %q %q %q %v", s, p, n, err)
 	}
 }
 
 func TestResolvePeerFlagsCustomConfigNotFound(t *testing.T) {
-	_, _, _, err := resolvePeerFlags("", "", "", "/nonexistent/vrndisd.conf")
+	_, _, _, err := resolvePeerFlags("", "", "", "/nonexistent/vrndisd.conf", true)
 	if err == nil || !strings.Contains(err.Error(), "--config /nonexistent/vrndisd.conf 读取失败") {
 		t.Fatalf("--config 文件不存在应报明确错误: got %v", err)
 	}
