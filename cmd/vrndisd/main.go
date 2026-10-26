@@ -111,6 +111,18 @@ func usage() {
   version        显示版本号
   help           显示本帮助
 
+通用选项（server / client / service install / service-run）：
+  --log-level <debug|info|warn|error>   日志级别，默认 info
+      debug 含数据面逐帧事件（网卡队列满丢帧、P2P 动态路由注册、候选变化），
+      弱网/弱设备下会刷屏；逐帧事件已自动合并为每秒一条计数统计。
+      服务模式也可写进配置文件的 "log_level" 字段（service install 持久化），
+      service-run 的 --log-level 可临时覆盖配置文件。
+
+示例（日志）：
+  sudo vrndisd server --listen 0.0.0.0:7777 --log-level warn
+  sudo vrndisd client --server 1.2.3.4:7777 --log-level debug
+  sudo vrndisd service install --mode client --server 1.2.3.4:7777 --log-level warn
+
 示例（STUN）：
   sudo vrndisd server --listen 0.0.0.0:7777 --stun
   sudo vrndisd server --listen 0.0.0.0:7777 --stun --stun-listen 0.0.0.0:5478
