@@ -829,8 +829,31 @@ func (s *Server) handleConn(conn net.Conn) {
 // ---- P2P ----
 
 // registerPeer 登记一个 peer 的候选地址。
+// clearStaleP2PReady 清除其它会话指向 mac 的 p2p-ready 标记。
+// 对端下线或地址漂移（NAT 重映射）后，持有旧地址的直连会话实际已死：
+// 若不清标记，pushCandidateToOthers/distributeCandidates 会以"已直连"
+// 为由跳过新候选下发，把接收方永远困在死路由上（缺陷 B 服务器侧）。
+func (s *Server) clearStaleP2PReady(mac string) {
+	s.mu.RLock()
+	sessions := make([]*session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.mu.RUnlock()
+	for _, sess := range sessions {
+		sess.p2pMu.Lock()
+		if sess.p2pPeerMAC == mac {
+			sess.p2pReady = false
+			sess.p2pPeerMAC = ""
+		}
+		sess.p2pMu.Unlock()
+	}
+}
+
 // unregisterPeer 清除已下线的 peer 记录。
 func (s *Server) unregisterPeer(mac string) {
+	// 锁序与 answerPeerQuery 一致（s.mu → peersMu），先清标记再持有 peersMu。
+	s.clearStaleP2PReady(mac)
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
 	delete(s.peers, mac)
@@ -876,6 +899,17 @@ func (s *Server) registerPeer(sess *session, mac, candidate string, candidates [
 	}
 	if primary == "" {
 		primary = filtered[0]
+	}
+	// 主候选相对上次注册发生变化（NAT 重映射未断线）时，清掉其它会话
+	// 指向本 peer 的 p2p-ready，使其重新收到新候选并更新路由。
+	s.peersMu.RLock()
+	var prevCand string
+	if old := s.peers[mac]; old != nil {
+		prevCand = old.candidate
+	}
+	s.peersMu.RUnlock()
+	if prevCand != "" && prevCand != primary {
+		s.clearStaleP2PReady(mac)
 	}
 	s.peersMu.Lock()
 	s.peers[mac] = &peerInfo{
