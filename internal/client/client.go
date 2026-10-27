@@ -1259,7 +1259,9 @@ func (c *Client) sockToDev(conn net.Conn, done chan struct{}) {
 					//  - 无路由也无验证过的候选 → 主动探测
 					//  - 已有路由但候选指向新地址（对端 NAT 重映射）→ 探测新候选，
 					//    成功即替换；避免旧路由指向已失效地址导致 UDP 静默丢包。
-					if tun := c.getTunnel(); tun != nil && !c.isP2PActive() {
+					// 注意：不得因"隧道活跃"而跳过——活跃隧道恰恰可能正指向
+					// 对端的旧（已死）地址，跳过即永久困在死路由（缺陷 B 客户端侧）。
+					if tun := c.getTunnel(); tun != nil {
 						cur := tun.Routes()[mac.String()]
 						routeInAddrs := false
 						registered := false

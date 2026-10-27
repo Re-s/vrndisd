@@ -327,9 +327,9 @@ func (t *Tunnel) ProbeRoute(mac net.HardwareAddr, addrs []*net.UDPAddr, timeout 
 	if mac == nil || len(addrs) == 0 {
 		return false
 	}
-	if t.HasRoute(mac) {
-		return true
-	}
+	// 注意：不得因"路由已存在"而直接判成功——已存在的路由可能正指向
+	// 对端的旧（已死）地址（NAT 重映射后），必须照常探测新候选并在可达
+	// 时替换；不可达时返回 false、保留旧路由（缺陷 B 修复要点）。
 	deadline := time.Now().Add(timeout)
 	try := time.NewTicker(200 * time.Millisecond)
 	defer try.Stop()

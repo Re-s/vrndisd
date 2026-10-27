@@ -484,3 +484,102 @@ func TestReplaysAdvertiseAfterServerRestart(t *testing.T) {
 		t.Fatalf("隧道不应重建: before=%p after=%p", tunBefore, tunAfter)
 	}
 }
+
+// 缺陷 B 客户端侧回归：隧道"活跃"（存在已注册路由）时收到对端新候选，
+// 必须探测并更新路由。旧实现以 !isP2PActive() 守卫跳过整个分支，
+// 活跃隧道恰可能正指向对端旧（已死）地址，跳过即永久困在死路由。
+func TestPeerCandidateUpdatesRouteWhileTunnelActive(t *testing.T) {
+	srv := newFakeP2PServer(t)
+	defer srv.Stop()
+
+	stun := stunserver.New(stunserver.Config{ListenAddr: "127.0.0.1:0"})
+	go func() { _ = stun.Start() }()
+	defer stun.Stop()
+	stunAddr := waitStunAddr(stun)
+	if stunAddr == "" {
+		t.Fatal("STUN server did not start")
+	}
+
+	devA := tap.NewFake("c0")
+	devB := tap.NewFake("c1")
+	cA := New(Config{
+		Server: srv.Addr(), TapName: "c0", Name: "alice",
+		P2P: true, STUNServer: stunAddr, DialTimeout: 2 * time.Second, Device: devA,
+	})
+	cB := New(Config{
+		Server: srv.Addr(), TapName: "c1", Name: "bob",
+		P2P: true, STUNServer: stunAddr, DialTimeout: 2 * time.Second, Device: devB,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go func() { _ = cA.Run(ctx) }()
+	go func() { _ = cB.Run(ctx) }()
+
+	var tunA *p2p.Tunnel
+	for i := 0; i < 60; i++ {
+		tunA = cA.getTunnel()
+		if tunA != nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if tunA == nil {
+		t.Fatal("A 的隧道未建立")
+	}
+	bMAC := peerMAC(t, tunA)
+
+	// 模拟对端 NAT 重映射：把 A 的路由强制指向"旧（死）地址"。
+	// 127.0.0.1:1 无监听，UDP 写入成功但永不回包 —— 复现死路由现场。
+	deadAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
+	tunA.RegisterRoute(bMAC, deadAddr)
+	if got := tunA.Routes()[bMAC.String()]; got != deadAddr.String() {
+		t.Fatalf("预设死路由失败: got %q want %q", got, deadAddr.String())
+	}
+
+	// "B 的新地址"：回显一切收包（对 probe 原路回 probe，模拟打洞应答）。
+	newPeer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newPeer.Close()
+	newAddr := newPeer.LocalAddr().String()
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, from, err := newPeer.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = newPeer.WriteToUDP(buf[:n], from)
+		}
+	}()
+
+	// 服务器向 A 下发 B 的"新"候选（模拟修复后的 pushCandidateToOthers）
+	pc := proto.PeerCandidate{
+		Version:    proto.ProtocolVersion,
+		PeerMAC:    bMAC.String(),
+		Candidate:  newAddr,
+		Candidates: []string{newAddr},
+	}
+	srv.mu.Lock()
+	connA := srv.conns[cA.assign.MAC]
+	srv.mu.Unlock()
+	if connA == nil {
+		t.Fatal("fake 服务器无 A 的连接")
+	}
+	if err := proto.WriteMessage(connA, proto.TypePeerCandidate, mustJSON(pc)); err != nil {
+		t.Fatalf("下发新候选: %v", err)
+	}
+
+	// 红线：A 的路由必须更新到新地址（旧实现恒为死地址）
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := tunA.Routes()[bMAC.String()]; got == newAddr {
+			return // 通过
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("隧道活跃时收到新候选后路由未更新: got %q want %q",
+		tunA.Routes()[bMAC.String()], newAddr)
+}
