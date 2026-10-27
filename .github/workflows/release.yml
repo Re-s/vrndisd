@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布版本号（缺省取 git describe）'
+        required: false
+
+permissions:
+  contents: write # 创建 Release / 上传资产需要
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe --tags 需要 tag 历史
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build all targets (release ldflags)
+        run: bash build/build.sh all release
+
+      - name: Package
+        run: |
+          set -e
+          VERSION="$(git describe --tags --always --dirty)"
+          if [ -n "${{ inputs.tag }}" ]; then VERSION="${{ inputs.tag }}"; fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p dist
+          for d in build/bin/*/; do
+            target="$(basename "$d")"
+            stage="vrndisd-$VERSION-$target"
+            rm -rf "dist/$stage"
+            mkdir -p "dist/$stage"
+            cp "$d"* "dist/$stage"/
+            cp README.md LICENSE "dist/$stage"/
+            if [[ "$target" == windows* ]]; then
+              (cd dist && zip -qr "$stage.zip" "$stage")
+            else
+              tar -czf "dist/$stage.tar.gz" -C dist "$stage"
+            fi
+            rm -rf "dist/$stage"
+          done
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: ${{ env.VERSION }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(env.VERSION, '-rc') || contains(env.VERSION, '-beta') }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/sha256sums.txt
